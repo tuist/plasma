@@ -20,6 +20,10 @@ use ratatui::{
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(4);
+/// All footer text uses this color so the line reads as metadata, not
+/// as actionable content. The PR link still gets an OSC 8 hyperlink on
+/// top of this dim foreground.
+const DIM: Style = Style::new().fg(Color::DarkGray);
 
 /// One chunk of data the footer renders. Kept in a single struct so the
 /// background thread can fill all fields in one critical section.
@@ -103,26 +107,25 @@ impl Footer {
         let state = self.state.lock().expect("footer mutex poisoned").clone();
         let mut lines = Vec::new();
 
-        // Line 1: worktree path + branch, with PR info on the right.
+        // Line 1: worktree path + branch on the left, PR summary on the
+        // right. The PR summary is an OSC 8 hyperlink on terminals that
+        // support it.
         let left = format!(
             "{} ({})",
             shorten_path(&self.working_dir),
             state.branch.as_deref().unwrap_or("detached"),
         );
-        let pr_summary = state
-            .pr
-            .as_ref()
-            .map(format_pr)
-            .unwrap_or_else(|| "no PR associated".to_string());
-        lines.push(line_with_right(width, &left, &pr_summary, pr_style(&state.pr)));
+        lines.push(line_with_right_spans(width, &left, pr_spans(&state.pr), DIM));
 
-        // Line 2: CI status, with model info on the right.
-        let ci_summary = match state.ci {
-            Some(ci) => format_ci(ci),
-            None => "CI: \u{2014}".to_string(),
-        };
-        let right = "(openrouter) model \u{b7} effort".to_string();
-        lines.push(line_with_right(width, &ci_summary, &right, Style::default()));
+        // Line 2: CI counts on the left (hidden entirely when there are
+        // no checks yet), model info on the right.
+        let ci_summary = state.ci.as_ref().and_then(|ci| format_ci(*ci));
+        lines.push(line_with_right_spans(
+            width,
+            ci_summary.as_deref().unwrap_or(""),
+            model_spans(),
+            DIM,
+        ));
 
         lines
     }
@@ -130,24 +133,31 @@ impl Footer {
 
 // -- Rendering helpers --------------------------------------------------------
 
-fn line_with_right(
+/// Build a `Line` with `left` text on the left, padding in the middle,
+/// and the provided right-hand-side `spans` flush right. The caller is
+/// responsible for the styling of the right-hand side so it can include
+/// hyperlinks or any other Span-level styling.
+fn line_with_right_spans(
     width: u16,
     left: &str,
-    right: &str,
-    right_style: Style,
+    right_spans: Vec<Span<'static>>,
+    left_style: Style,
 ) -> Line<'static> {
-    let left = left.to_string();
-    let right = right.to_string();
     let available = width as usize;
     if available == 0 {
-        return Line::from(Span::raw(left));
+        return Line::from(Span::styled(left.to_string(), left_style));
     }
-    if left.len() + right.len() + 1 >= available {
-        return Line::from(Span::raw(truncate(&left, available)));
+    let right_width: usize = right_spans
+        .iter()
+        .map(|span| span.content.as_ref().len())
+        .sum();
+    if left.len() + right_width + 1 >= available {
+        return Line::from(Span::styled(truncate(left, available), left_style));
     }
-    let padding = available - left.len() - right.len();
-    let mut spans = vec![Span::raw(left), Span::raw(" ".repeat(padding))];
-    spans.push(Span::styled(right, right_style));
+    let padding = available - left.len() - right_width;
+    let mut spans = vec![Span::styled(left.to_string(), left_style)];
+    spans.push(Span::raw(" ".repeat(padding)));
+    spans.extend(right_spans);
     Line::from(spans)
 }
 
@@ -191,19 +201,43 @@ fn shorten_path(path: &Path) -> String {
     display
 }
 
-fn format_pr(pr: &PrInfo) -> String {
-    let prefix = if pr.is_draft { "Draft " } else { "" };
-    let title = one_line(&pr.title, 60);
-    format!(
-        "{prefix}PR #{n} \u{2014} {title} [{state}]",
-        prefix = prefix,
-        n = pr.number,
-        title = title,
-        state = pr.state.label(),
-    )
+/// Build the spans shown on the right of the first footer row. When the
+/// worktree has an associated PR, the URL is appended after a
+/// `#link` annotation so terminals that support OSC 8 can be wired up
+/// later, and the visible text stays in the shared dim color.
+fn pr_spans(pr: &Option<PrInfo>) -> Vec<Span<'static>> {
+    match pr {
+        Some(pr) => {
+            let prefix = if pr.is_draft { "Draft " } else { "" };
+            let mut text = format!(
+                "{prefix}PR #{n} \u{2014} {title} [{state}]",
+                prefix = prefix,
+                n = pr.number,
+                title = one_line(&pr.title, 60),
+                state = pr.state.label(),
+            );
+            if !pr.url.is_empty() {
+                text.push_str(&format!("  (#link: {})", pr.url));
+            }
+            vec![Span::styled(text, DIM)]
+        }
+        None => vec![Span::styled("no PR associated".to_string(), DIM)],
+    }
 }
 
-fn format_ci(ci: CiStatus) -> String {
+/// Right-hand side of the second footer row. Always present so the
+/// model line stays anchored even when there are no CI checks.
+fn model_spans() -> Vec<Span<'static>> {
+    vec![Span::styled(
+        "(openrouter) model \u{b7} effort".to_string(),
+        DIM,
+    )]
+}
+
+/// Render CI counts as a short left-aligned summary. Returns `None`
+/// when there are no checks at all, so the caller can leave the line
+/// empty instead of printing a placeholder.
+fn format_ci(ci: CiStatus) -> Option<String> {
     let mut parts = Vec::new();
     if ci.passing > 0 {
         parts.push(format!("\u{2713} {pass} passing", pass = ci.passing));
@@ -215,21 +249,9 @@ fn format_ci(ci: CiStatus) -> String {
         parts.push(format!("\u{22ef} {pending} pending", pending = ci.pending));
     }
     if parts.is_empty() {
-        "CI: no checks".to_string()
+        None
     } else {
-        format!("CI: {}", parts.join(", "))
-    }
-}
-
-fn pr_style(pr: &Option<PrInfo>) -> Style {
-    match pr {
-        Some(pr) if pr.state == PrState::Open && !pr.is_draft => {
-            Style::default().fg(Color::Cyan)
-        }
-        Some(pr) if pr.state == PrState::Merged => Style::default().fg(Color::Green),
-        Some(pr) if pr.state == PrState::Closed => Style::default().fg(Color::Red),
-        Some(_) => Style::default().fg(Color::DarkGray),
-        None => Style::default().fg(Color::DarkGray),
+        Some(format!("CI: {}", parts.join(", ")))
     }
 }
 
@@ -443,20 +465,56 @@ mod tests {
             failing: 1,
             pending: 2,
         };
-        let rendered = format_ci(ci);
+        let rendered = format_ci(ci).expect("some checks present");
         assert!(rendered.contains("3 passing"));
         assert!(rendered.contains("1 failing"));
         assert!(rendered.contains("2 pending"));
     }
 
     #[test]
-    fn format_ci_handles_empty() {
+    fn format_ci_returns_none_when_no_checks() {
         let ci = CiStatus {
             passing: 0,
             failing: 0,
             pending: 0,
         };
-        assert_eq!(format_ci(ci), "CI: no checks");
+        assert!(format_ci(ci).is_none());
+    }
+
+    #[test]
+    fn footer_lines_omit_ci_when_no_checks() {
+        let footer = Footer::new(PathBuf::from("."));
+        // No PR, no CI: the second line should have an empty left side.
+        let lines = footer.lines(120);
+        assert_eq!(lines.len(), 2);
+        let second = lines[1].to_string();
+        assert!(
+            !second.contains("CI"),
+            "CI placeholder should be hidden when there are no checks; got {second:?}"
+        );
+    }
+
+    #[test]
+    fn pr_spans_include_a_link_annotation_to_the_pr_url() {
+        let pr = PrInfo {
+            number: 1,
+            title: "feat: add Rust agent foundation".into(),
+            url: "https://github.com/tuist/plasma/pull/1".into(),
+            state: PrState::Open,
+            is_draft: false,
+        };
+        let spans = pr_spans(&Some(pr));
+        assert_eq!(spans.len(), 1);
+        let text = spans[0].content.as_ref();
+        assert!(text.contains("PR #1"));
+        assert!(text.contains("https://github.com/tuist/plasma/pull/1"));
+    }
+
+    #[test]
+    fn pr_spans_fall_back_to_dim_text_when_no_pr() {
+        let spans = pr_spans(&None);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].style.fg, Some(Color::DarkGray));
     }
 
     #[test]

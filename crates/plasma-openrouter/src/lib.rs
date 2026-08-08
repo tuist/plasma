@@ -1,8 +1,8 @@
 use std::{fs, io, path::PathBuf};
 
 use directories::ProjectDirs;
-use plasma_inference::{InferenceError, InferenceProvider};
-use plasma_protocol::{Message, Role};
+use plasma_inference::{InferenceError, InferenceProvider, ToolDefinition};
+use plasma_protocol::{Message, Role, ToolCall};
 use serde_json::{Value, json};
 
 const DEFAULT_MODEL: &str = "openai/gpt-4.1-mini";
@@ -30,30 +30,115 @@ impl InferenceProvider for OpenRouterInferenceProvider {
         "OpenRouter"
     }
 
-    fn complete(&mut self, history: &[Message]) -> Result<Message, InferenceError> {
+    fn complete(
+        &mut self,
+        history: &[Message],
+        tools: &[ToolDefinition],
+    ) -> Result<Message, InferenceError> {
         let messages: Vec<Value> = history
             .iter()
-            .map(|message| json!({"role": role_name(&message.role), "content": message.content}))
+            .map(message_to_openai)
             .collect();
+        let tools_payload: Vec<Value> = tools
+            .iter()
+            .map(|tool| {
+                json!({
+                    "type": "function",
+                    "function": {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": tool.parameters,
+                    }
+                })
+            })
+            .collect();
+        let mut body = json!({"model": self.model, "messages": messages});
+        if !tools_payload.is_empty() {
+            body["tools"] = Value::Array(tools_payload);
+        }
         let response = ureq::post("https://openrouter.ai/api/v1/chat/completions")
             .header("Authorization", &format!("Bearer {}", self.api_key))
             .header("HTTP-Referer", "https://github.com/tuist/plasma")
-            .send_json(json!({"model": self.model, "messages": messages}))
+            .send_json(body)
             .map_err(|error| InferenceError::Request(error.to_string()))?;
-        let mut body = response.into_body();
+        let mut response_body = response.into_body();
         let value: Value = serde_json::from_str(
-            &body
+            &response_body
                 .read_to_string()
                 .map_err(|error| InferenceError::Request(error.to_string()))?,
         )
         .map_err(|error| InferenceError::Request(error.to_string()))?;
-        let content = value["choices"][0]["message"]["content"]
-            .as_str()
+        let message_value = &value["choices"][0]["message"];
+        if let Some(calls) = message_value.get("tool_calls").and_then(Value::as_array) {
+            let tool_calls: Vec<ToolCall> = calls
+                .iter()
+                .map(parse_tool_call)
+                .collect::<Result<_, _>>()?;
+            let content = message_value
+                .get("content")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            return Ok(Message::assistant_with_tool_calls(content, tool_calls));
+        }
+        let content = message_value
+            .get("content")
+            .and_then(Value::as_str)
             .ok_or_else(|| {
                 InferenceError::Request("response did not include assistant content".into())
             })?;
         Ok(Message::assistant(content))
     }
+}
+
+fn message_to_openai(message: &Message) -> Value {
+    let mut object = json!({"role": role_name(&message.role), "content": message.content});
+    if let Some(calls) = &message.tool_calls {
+        let calls: Vec<Value> = calls
+            .iter()
+            .map(|call| {
+                json!({
+                    "id": call.id,
+                    "type": "function",
+                    "function": {
+                        "name": call.name,
+                        "arguments": call.arguments,
+                    }
+                })
+            })
+            .collect();
+        object["tool_calls"] = Value::Array(calls);
+    }
+    if let Some(id) = &message.tool_call_id {
+        object["tool_call_id"] = Value::String(id.clone());
+    }
+    object
+}
+
+fn parse_tool_call(value: &Value) -> Result<ToolCall, InferenceError> {
+    let id = value
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| InferenceError::Request("tool call missing id".into()))?
+        .to_string();
+    let function = value
+        .get("function")
+        .ok_or_else(|| InferenceError::Request("tool call missing function".into()))?;
+    let name = function
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| InferenceError::Request("tool call missing name".into()))?
+        .to_string();
+    let arguments = function
+        .get("arguments")
+        .and_then(Value::as_str)
+        .unwrap_or("{}")
+        .to_string();
+    Ok(ToolCall {
+        id,
+        name,
+        arguments,
+    })
 }
 
 pub fn save_key(api_key: &str) -> io::Result<()> {

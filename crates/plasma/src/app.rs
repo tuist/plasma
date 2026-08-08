@@ -1,18 +1,24 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
+use plasma_inference::ToolDefinition;
 use plasma_openrouter::{OpenRouterInferenceProvider, save_key};
-use plasma_session::Session;
-use plasma_tools::workspace_files;
+use plasma_session::{AgentEvent, Session, ToolDispatcher};
+use plasma_tools::{BashTool, ReadTool, Tool, workspace_files};
 use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
 };
+use serde_json::Value;
 
 use crate::browser::{BrowserOpener, SystemBrowser};
 use crate::footer::Footer;
-use crate::theme::{MENU_HINT, SELECTED, SLASH_COMMAND, SUCCESS, TITLE};
+use crate::theme::{
+    AGENT_TEXT, MENU_HINT, SELECTED, SLASH_COMMAND, SUCCESS, TITLE, TOOL_BODY,
+    TOOL_ERROR, TOOL_NAME, TOOL_RESULT,
+};
 
 /// One row in the slash-command menu.
 #[derive(Clone, Copy)]
@@ -73,6 +79,8 @@ pub struct App {
     pub should_exit: bool,
     pub footer: Footer,
     browser: Box<dyn BrowserOpener>,
+    tool_definitions: Arc<Vec<ToolDefinition>>,
+    dispatcher: AppToolDispatcher,
 }
 
 impl App {
@@ -102,6 +110,7 @@ impl App {
     /// Create a bare app with no filesystem access. Used by tests so they
     /// can run in parallel without touching the user's config.
     pub fn empty() -> Self {
+        let (tool_definitions, dispatcher) = build_tool_chain(PathBuf::from("."));
         Self {
             session: None,
             input: String::new(),
@@ -112,6 +121,8 @@ impl App {
             should_exit: false,
             footer: Footer::new(PathBuf::from(".")),
             browser: Box::new(SystemBrowser),
+            tool_definitions,
+            dispatcher,
         }
     }
 
@@ -496,12 +507,49 @@ impl App {
     }
 
     fn send_prompt(&mut self, prompt: &str) {
-        match self.session.as_mut() {
-            Some(session) => match session.submit(prompt) {
-                Ok(message) => self.document.push(Line::from(message.content)),
-                Err(error) => self.push_info(format!("Request failed: {error}")),
-            },
-            None => unreachable!("send_prompt is only called when a session exists"),
+        let Some(session) = self.session.as_mut() else {
+            unreachable!("send_prompt is only called when a session exists")
+        };
+        let definitions = Arc::clone(&self.tool_definitions);
+        let dispatcher = &self.dispatcher as &dyn ToolDispatcher;
+        // The session borrow cannot overlap with `self` inside the
+        // event callback, so collect events into a `Vec` while the
+        // session is still borrowed and replay them once it is released.
+        let mut events: Vec<AgentEvent> = Vec::new();
+        let result = session.submit_with_tools(
+            prompt,
+            definitions,
+            dispatcher,
+            &mut |event| events.push(event),
+        );
+        for event in events {
+            self.handle_agent_event(event);
+        }
+        if let Err(error) = result {
+            self.push_info(format!("Request failed: {error}"));
+        }
+    }
+
+    fn handle_agent_event(&mut self, event: AgentEvent) {
+        match event {
+            AgentEvent::Text(text) => {
+                if text.trim().is_empty() {
+                    return;
+                }
+                for line in text.lines() {
+                    self.document.push(Line::from(Span::styled(
+                        line.to_string(),
+                        AGENT_TEXT,
+                    )));
+                }
+            }
+            AgentEvent::ToolCall { name, arguments } => {
+                self.document.push(Line::from(""));
+                self.document.push(tool_call_line(&name, &arguments));
+            }
+            AgentEvent::ToolResult { name, output, error } => {
+                self.document.push(tool_result_line(&name, output, error));
+            }
         }
     }
 }
@@ -510,6 +558,81 @@ impl Default for App {
     fn default() -> Self {
         Self::empty()
     }
+}
+
+/// Routes `ToolCall`s (name + JSON arguments) to the matching `Tool`
+/// implementation. Keeps the session decoupled from the concrete tool
+/// set the host registered at startup.
+struct AppToolDispatcher {
+    tools: Vec<Box<dyn Tool>>,
+}
+
+impl ToolDispatcher for AppToolDispatcher {
+    fn dispatch(&self, name: &str, arguments_json: &str) -> Result<String, String> {
+        let tool = self
+            .tools
+            .iter()
+            .find(|tool| tool.name() == name)
+            .ok_or_else(|| format!("unknown tool '{name}'"))?;
+        let arguments: Value = serde_json::from_str(arguments_json)
+            .map_err(|error| format!("invalid JSON arguments for {name}: {error}"))?;
+        tool.execute(&arguments)
+    }
+}
+
+fn build_tool_chain(root: PathBuf) -> (Arc<Vec<ToolDefinition>>, AppToolDispatcher) {
+    let tools: Vec<Box<dyn Tool>> = vec![
+        Box::new(ReadTool { root: root.clone() }),
+        Box::new(BashTool { root, ..BashTool::default() }),
+    ];
+    let definitions: Vec<ToolDefinition> = tools.iter().map(|tool| tool.definition()).collect();
+    let dispatcher = AppToolDispatcher { tools };
+    (Arc::new(definitions), dispatcher)
+}
+/// tool name bolded and the arguments dimmed, gPi-style.
+fn tool_call_line(name: &str, arguments: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!("$ {name}"), TOOL_NAME),
+        Span::styled(format!(" {}", summarize_args(arguments)), TOOL_BODY),
+    ])
+}
+
+/// Render a tool result line. The body is the first line of the output;
+/// errors are shown in red.
+fn tool_result_line(name: &str, output: String, error: Option<String>) -> Line<'static> {
+    let mut spans = vec![Span::styled(format!("\u{2191} {name}"), TOOL_NAME)];
+    match error {
+        Some(message) => {
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(
+                truncate_for_display(&message, 240),
+                TOOL_ERROR,
+            ));
+        }
+        None => {
+            let first_line = output.lines().next().unwrap_or("");
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(first_line.to_string(), TOOL_RESULT));
+        }
+    }
+    Line::from(spans)
+}
+
+fn summarize_args(arguments: &str) -> String {
+    let trimmed = arguments.trim();
+    if trimmed.len() > 200 {
+        format!("{}\u{2026}", &trimmed[..200])
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn truncate_for_display(input: &str, max: usize) -> String {
+    let one_line = input.replace('\n', " ");
+    if one_line.len() <= max {
+        return one_line;
+    }
+    format!("{}\u{2026}", &one_line[..max])
 }
 
 /// URL to the provider's page where the user can create or copy an API key.

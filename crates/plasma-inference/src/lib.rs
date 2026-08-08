@@ -1,4 +1,5 @@
 use plasma_protocol::Message;
+use serde_json::Value;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -9,7 +10,21 @@ pub enum InferenceError {
     Request(String),
 }
 
+/// OpenAI-compatible tool definition sent to the provider. Each entry is
+/// passed through to the `tools` array of the chat completion request.
+#[derive(Clone, Debug)]
+pub struct ToolDefinition {
+    pub name: String,
+    pub description: String,
+    /// JSON Schema for the function arguments.
+    pub parameters: Value,
+}
+
 pub trait InferenceProvider {
     fn name(&self) -> &str;
-    fn complete(&mut self, history: &[Message]) -> Result<Message, InferenceError>;
+    fn complete(
+        &mut self,
+        history: &[Message],
+        tools: &[ToolDefinition],
+    ) -> Result<Message, InferenceError>;
 }

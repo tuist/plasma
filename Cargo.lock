@@ -828,6 +828,7 @@ dependencies = [
  "crossterm",
  "fuzzy-matcher",
  "open",
+ "plasma-inference",
  "plasma-openrouter",
  "plasma-session",
  "plasma-tools",
@@ -842,6 +843,7 @@ name = "plasma-inference"
 version = "0.1.0"
 dependencies = [
  "plasma-protocol",
+ "serde_json",
  "thiserror 2.0.20",
 ]
 
@@ -874,6 +876,10 @@ dependencies = [
 [[package]]
 name = "plasma-tools"
 version = "0.1.0"
+dependencies = [
+ "plasma-inference",
+ "serde_json",
+]
 
 [[package]]
 name = "potential_utf"
