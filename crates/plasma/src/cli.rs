@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand};
 use plasma_openrouter::save_key;
 
 #[derive(Parser)]
-#[command(name = "plasma", about = "A Rust coding agent")]
+#[command(name = "plasma", about = "A coding agent")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,

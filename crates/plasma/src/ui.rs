@@ -1,15 +1,13 @@
 use anyhow::Result;
 use crossterm::{
-    event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind, MouseEvent, MouseEventKind,
-    },
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
-    layout::{Constraint, Layout, Rect},
+    layout::{Constraint, Layout},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
 };
@@ -21,7 +19,6 @@ use crate::theme::{PROMPT_BORDER, PROMPT_PREFIX};
 
 const SLASH_MENU_HEIGHT: u16 = 5;
 const PROMPT_BORDER_HEIGHT: u16 = 3; // top border + content + bottom border
-const PLASMA_HEIGHT: u16 = 3;
 const FRAME_INTERVAL: Duration = Duration::from_millis(40);
 
 pub fn run() -> Result<()> {
@@ -46,7 +43,6 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()>
     while !app.should_exit {
         let frame_start = std::time::Instant::now();
 
-        app.plasma.step();
         terminal.draw(|frame| draw(frame, &app))?;
 
         // Drain any queued events without blocking so the loop keeps redrawing.
@@ -57,7 +53,6 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()>
                         app.should_exit = true;
                     }
                 }
-                Event::Mouse(mouse) => handle_mouse(&mut app, mouse),
                 _ => {}
             }
         }
@@ -70,26 +65,12 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()>
     Ok(())
 }
 
-fn handle_mouse(app: &mut App, mouse: MouseEvent) {
-    match mouse.kind {
-        MouseEventKind::Moved | MouseEventKind::Drag(_) => {
-            app.plasma.set_mouse(mouse.column, mouse.row);
-        }
-        // Keep the last known mouse position so the ripple keeps trailing
-        // the cursor. The renderer ignores the position when the cursor is
-        // outside the plasma strip, so leaving the area naturally fades the
-        // effect.
-        _ => {}
-    }
-}
-
 fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
     let mut constraints = vec![Constraint::Min(0)];
     if app.should_show_commands() {
         constraints.push(Constraint::Length(SLASH_MENU_HEIGHT));
     }
-    constraints.push(Constraint::Length(PLASMA_HEIGHT));
     constraints.push(Constraint::Length(PROMPT_BORDER_HEIGHT));
     let chunks = Layout::vertical(constraints).split(area);
 
@@ -98,13 +79,9 @@ fn draw(frame: &mut Frame, app: &App) {
 
     // Slash-command menu, if visible.
     if app.should_show_commands() {
-        let menu_index = chunks.len() - 3;
+        let menu_index = chunks.len() - 2;
         frame.render_widget(Paragraph::new(app.slash_menu_lines()), chunks[menu_index]);
     }
-
-    // Plasma field strip directly above the prompt.
-    let plasma_area: Rect = chunks[chunks.len() - 2];
-    frame.render_widget(Paragraph::new(app.plasma.render(plasma_area)), plasma_area);
 
     // Prompt with top and bottom borders so the input area is obvious.
     let prompt_area = *chunks.last().expect("prompt chunk is always present");

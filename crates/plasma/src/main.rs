@@ -1,8 +1,8 @@
 use anyhow::Result;
 use clap::Parser;
 
-mod animation;
 mod app;
+mod browser;
 mod cli;
 mod input;
 mod theme;

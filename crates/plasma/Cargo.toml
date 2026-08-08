@@ -9,6 +9,7 @@ anyhow.workspace = true
 clap.workspace = true
 crossterm.workspace = true
 fuzzy-matcher.workspace = true
+open.workspace = true
 plasma-openrouter = { path = "../plasma-openrouter" }
 plasma-session = { path = "../plasma-session" }
 plasma-tools = { path = "../plasma-tools" }
