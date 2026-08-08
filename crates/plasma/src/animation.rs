@@ -1,29 +1,43 @@
-//! Particle animation rendered in Unicode braille characters that sits between
-//! the document and the prompt. The particles drift around a bounded field, and
-//! when the user moves the mouse over the strip they get pulled towards the
-//! cursor, giving the area above the text field a sense of life.
+//! A flowing plasma field rendered in Unicode braille characters.
+//!
+//! The field is a classic demoscene-style plasma: several sine waves of
+//! different frequency and direction combined over time, mapped to a colour
+//! gradient. Each terminal cell is a 2x4 block of sub-pixels, and the
+//! intensity at a sub-pixel decides how many of the eight braille dots get
+//! lit, so the strip reads as a smooth, living gradient rather than a
+//! scatter of dots.
+//!
+//! While the mouse cursor is over the strip, a ripple emanates from the
+//! cursor position and a soft hot spot follows it, so the field reacts
+//! directly to where the user is pointing.
 
 use ratatui::{
+    layout::Rect,
     style::{Color, Style},
     text::{Line, Span},
 };
 
-const FIELD_WIDTH: f32 = 100.0;
-const FIELD_HEIGHT: f32 = 24.0; // 6 braille rows * 4 sub-rows
-
-#[derive(Clone, Copy)]
-struct Particle {
-    x: f32,
-    y: f32,
-    vx: f32,
-    vy: f32,
-    hue: f32,
-}
+/// The order in which the eight braille dots inside a cell are filled as the
+/// intensity rises. This walks the cell top-to-bottom, left-to-right so the
+/// gradient reads as a smooth fill instead of a random pattern.
+const FILL_ORDER: [(usize, usize); 8] = [
+    (0, 0),
+    (1, 0),
+    (0, 1),
+    (1, 1),
+    (0, 2),
+    (1, 2),
+    (0, 3),
+    (1, 3),
+];
 
 pub struct PlasmaField {
-    particles: Vec<Particle>,
-    tick: u64,
-    mouse: Option<(f32, f32)>,
+    /// Animation time, in arbitrary units. The wave phases advance with this.
+    tick: f32,
+    /// Last known mouse position in global terminal coordinates. The renderer
+    /// decides whether it is inside the strip and converts it to local
+    /// sub-pixel coordinates.
+    mouse: Option<(u16, u16)>,
 }
 
 impl Default for PlasmaField {
@@ -34,130 +48,88 @@ impl Default for PlasmaField {
 
 impl PlasmaField {
     pub fn new() -> Self {
-        // Spread particles across the field with deterministic pseudo-random
-        // starting positions so the animation looks similar on every launch
-        // without needing an RNG dependency.
-        let mut particles = Vec::with_capacity(28);
-        for index in 0..28 {
-            let seed = index as f32 * 1.7;
-            let x = (seed * 13.0).rem_euclid(FIELD_WIDTH);
-            let y = (seed * 7.0).rem_euclid(FIELD_HEIGHT);
-            let vx = (seed * 0.91).sin() * 0.6;
-            let vy = (seed * 1.13).cos() * 0.4;
-            let hue = seed.rem_euclid(1.0);
-            particles.push(Particle { x, y, vx, vy, hue });
-        }
         Self {
-            particles,
-            tick: 0,
+            tick: 0.0,
             mouse: None,
         }
     }
 
     pub fn set_mouse(&mut self, x: u16, y: u16) {
-        self.mouse = Some((x as f32, y as f32));
-    }
-
-    pub fn clear_mouse(&mut self) {
-        self.mouse = None;
+        self.mouse = Some((x, y));
     }
 
     pub fn step(&mut self) {
-        self.tick = self.tick.wrapping_add(1);
-        let phase = self.tick as f32 * 0.05;
-        for particle in &mut self.particles {
-            // Gentle ambient swirl so the field always has motion, even without
-            // mouse input.
-            particle.vx += (phase + particle.hue * std::f32::consts::TAU).sin() * 0.04;
-            particle.vy += (phase + particle.hue * std::f32::consts::PI).cos() * 0.04;
-
-            if let Some((mx, my)) = self.mouse {
-                let dx = mx - particle.x;
-                let dy = my - particle.y;
-                let dist_sq = dx * dx + dy * dy + 8.0;
-                let pull = 18.0 / dist_sq;
-                particle.vx += dx * pull * 0.02;
-                particle.vy += dy * pull * 0.02;
-            }
-
-            // Damping to keep velocities bounded.
-            particle.vx *= 0.94;
-            particle.vy *= 0.94;
-
-            particle.x += particle.vx;
-            particle.y += particle.vy;
-
-            // Bounce off the field edges.
-            if particle.x < 0.0 {
-                particle.x = 0.0;
-                particle.vx = -particle.vx;
-            } else if particle.x > FIELD_WIDTH {
-                particle.x = FIELD_WIDTH;
-                particle.vx = -particle.vx;
-            }
-            if particle.y < 0.0 {
-                particle.y = 0.0;
-                particle.vy = -particle.vy;
-            } else if particle.y > FIELD_HEIGHT {
-                particle.y = FIELD_HEIGHT;
-                particle.vy = -particle.vy;
-            }
-        }
+        // Advance the wave phases. Tuned so the field flows at a calm pace
+        // (~one full cycle every few seconds) at the 25 fps frame rate.
+        self.tick += 0.06;
     }
 
-    /// Render the field as a stack of braille-character lines. `width` and
-    /// `height` are in terminal cells, where each cell becomes a 2x4 block of
-    /// sub-pixels.
-    pub fn render(&self, width: u16, height: u16) -> Vec<Line<'static>> {
-        let width = width as usize;
-        let height = height as usize;
+    /// Render the field into braille-character lines for the given terminal
+    /// area. Returns one `Line` per row of the area.
+    pub fn render(&self, area: Rect) -> Vec<Line<'static>> {
+        let width = area.width as usize;
+        let height = area.height as usize;
+        if width == 0 || height == 0 {
+            return Vec::new();
+        }
         let sub_width = width * 2;
         let sub_height = height * 4;
-        let mut grid = vec![0u8; sub_width * sub_height];
 
-        for particle in &self.particles {
-            // Map the field coordinate (0..FIELD_WIDTH / FIELD_HEIGHT) into the
-            // sub-pixel grid of the rendered area.
-            let sx = ((particle.x / FIELD_WIDTH) * sub_width as f32) as i32;
-            let sy = ((particle.y / FIELD_HEIGHT) * sub_height as f32) as i32;
-            // Each particle lights its own dot plus a soft halo of neighbours
-            // so it reads as a glowing point rather than a single sub-pixel.
-            for dy in -1..=1 {
-                for dx in -1..=1 {
-                    let nx = sx + dx;
-                    let ny = sy + dy;
-                    if nx < 0 || ny < 0 || nx >= sub_width as i32 || ny >= sub_height as i32 {
-                        continue;
-                    }
-                    let manhattan = dx.unsigned_abs() + dy.unsigned_abs();
-                    let intensity = match manhattan {
-                        0 => 3,
-                        1 => 2,
-                        _ => 1,
-                    };
-                    let idx = ny as usize * sub_width + nx as usize;
-                    grid[idx] = grid[idx].saturating_add(intensity);
-                }
+        // Map the global mouse position into the local sub-pixel coordinate
+        // system if it is currently over the strip. Outside the strip the
+        // ripple and hot spot simply disappear.
+        let local_mouse = self.mouse.and_then(|(mx, my)| {
+            if mx >= area.x
+                && mx < area.x + area.width
+                && my >= area.y
+                && my < area.y + area.height
+            {
+                let lx = f32::from(mx - area.x) * 2.0;
+                let ly = f32::from(my - area.y) * 4.0;
+                Some((lx, ly))
+            } else {
+                None
+            }
+        });
+
+        // Per-sub-pixel intensity in the range 0..=8. 0 means the dot is off,
+        // 8 means the cell is fully lit.
+        let mut grid = vec![0u8; sub_width * sub_height];
+        let t = self.tick;
+        for sy in 0..sub_height {
+            for sx in 0..sub_width {
+                let value = plasma_value(sx as f32, sy as f32, t, local_mouse);
+                let intensity = ((value + 1.0) * 4.0).clamp(0.0, 8.0) as u8;
+                grid[sy * sub_width + sx] = intensity;
             }
         }
 
+        // Pack intensities into braille characters, choosing the colour by
+        // the highest intensity reached in the cell. Each cell lights the
+        // first `max_intensity` dots in FILL_ORDER so the cell reads as a
+        // smooth fill rather than a random pattern.
         let mut lines = Vec::with_capacity(height);
         for row in 0..height {
             let mut spans = Vec::with_capacity(width);
             for col in 0..width {
-                let mut bits: u8 = 0;
+                let mut max_intensity: u8 = 0;
                 for sub_y in 0..4 {
                     for sub_x in 0..2 {
-                        if grid[row * 4 * sub_width + sub_y * sub_width + col * 2 + sub_x] > 0 {
-                            bits |= braille_bit(sub_x, sub_y);
-                        }
+                        let idx = (row * 4 + sub_y) * sub_width + col * 2 + sub_x;
+                        max_intensity = max_intensity.max(grid[idx]);
+                    }
+                }
+                let mut bits: u8 = 0;
+                for (index, &(sub_x, sub_y)) in FILL_ORDER.iter().enumerate() {
+                    if (index as u8) < max_intensity {
+                        bits |= braille_bit(sub_x, sub_y);
                     }
                 }
                 let glyph = char::from_u32(0x2800 + bits as u32).unwrap_or(' ');
                 if bits == 0 {
                     spans.push(Span::raw(" "));
                 } else {
-                    let color = plasma_color(self.tick, col as u32, row as u32);
+                    let color = plasma_color(max_intensity);
                     spans.push(Span::styled(glyph.to_string(), Style::default().fg(color)));
                 }
             }
@@ -181,14 +153,41 @@ fn braille_bit(sub_x: usize, sub_y: usize) -> u8 {
     }
 }
 
-fn plasma_color(tick: u64, col: u32, row: u32) -> Color {
-    // Cycle through cyan, blue and a soft magenta so the strip never sits on
-    // a single flat colour.
-    let phase = (tick as f32 * 0.1 + col as f32 * 0.3 + row as f32 * 0.5) % std::f32::consts::TAU;
-    let band = (phase.sin() + 1.0) / 2.0;
-    if band < 0.5 {
-        Color::Rgb(40, 180 + ((1.0 - band * 2.0) * 60.0) as u8, 220)
-    } else {
-        Color::Rgb(80 + ((band - 0.5) * 2.0 * 80.0) as u8, 200, 220)
+/// Compute the raw plasma value at a sub-pixel. Four sine waves of different
+/// frequency and direction are summed, then optionally distorted by the
+/// mouse position to add a ripple and a hot spot.
+fn plasma_value(x: f32, y: f32, t: f32, mouse: Option<(f32, f32)>) -> f32 {
+    let a = (x * 0.10 + t).sin();
+    let b = (y * 0.30 + t * 0.6).sin();
+    let c = ((x + y) * 0.05 + t * 0.4).sin();
+    let d = ((x * x + y * y).sqrt() * 0.08 - t * 0.5).sin();
+    let mut v = a + b + c + d;
+
+    if let Some((mx, my)) = mouse {
+        let dx = x - mx;
+        let dy = y - my;
+        let dist = (dx * dx + dy * dy).sqrt();
+        // A radial ripple that travels outward and decays with distance.
+        let ripple = (dist * 0.25 - t * 4.0).sin() * (-dist * 0.04).exp();
+        // A localised hot spot that follows the cursor.
+        let hotspot = (-dist * 0.10).exp() * 1.6;
+        v += ripple * 1.5 + hotspot;
+    }
+
+    v / 4.0
+}
+
+fn plasma_color(intensity: u8) -> Color {
+    // Walk from a dim blue through cyan up to a near-white peak so the
+    // bright areas of the wave read as energetic plasma.
+    match intensity {
+        0 | 1 => Color::Rgb(40, 90, 150),
+        2 => Color::Rgb(50, 140, 200),
+        3 => Color::Rgb(70, 180, 220),
+        4 => Color::Rgb(90, 210, 230),
+        5 => Color::Cyan,
+        6 => Color::Rgb(150, 230, 240),
+        7 => Color::Rgb(200, 245, 250),
+        _ => Color::Rgb(235, 250, 255),
     }
 }

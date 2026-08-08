@@ -75,7 +75,11 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
         MouseEventKind::Moved | MouseEventKind::Drag(_) => {
             app.plasma.set_mouse(mouse.column, mouse.row);
         }
-        _ => app.plasma.clear_mouse(),
+        // Keep the last known mouse position so the ripple keeps trailing
+        // the cursor. The renderer ignores the position when the cursor is
+        // outside the plasma strip, so leaving the area naturally fades the
+        // effect.
+        _ => {}
     }
 }
 
@@ -100,7 +104,7 @@ fn draw(frame: &mut Frame, app: &App) {
 
     // Plasma field strip directly above the prompt.
     let plasma_area: Rect = chunks[chunks.len() - 2];
-    frame.render_widget(Paragraph::new(app.plasma.render(plasma_area.width, plasma_area.height)), plasma_area);
+    frame.render_widget(Paragraph::new(app.plasma.render(plasma_area)), plasma_area);
 
     // Prompt with top and bottom borders so the input area is obvious.
     let prompt_area = *chunks.last().expect("prompt chunk is always present");
