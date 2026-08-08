@@ -112,8 +112,10 @@ impl App {
         }
     }
 
-    fn lines(&self) -> Vec<Line<'static>> {
+    fn render(&self) -> (Vec<Line<'static>>, usize) {
         let mut lines = self.document.clone();
+        lines.push(Line::from(format!("> {}", self.input)));
+        let prompt_index = lines.len() - 1;
         if self.show_commands {
             lines.extend([
                 Line::from(Span::styled(
@@ -126,8 +128,7 @@ impl App {
                 Line::from("/quit      Exit Plasma"),
             ]);
         }
-        lines.push(Line::from(format!("> {}", self.input)));
-        lines
+        (lines, prompt_index)
     }
 }
 
@@ -163,11 +164,11 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
     while !app.should_exit {
         terminal.draw(|frame| {
             let area = frame.area();
-            frame.render_widget(Paragraph::new(app.lines()), area);
+            let (lines, prompt_index) = app.render();
+            frame.render_widget(Paragraph::new(lines), area);
             let cursor_x =
                 (area.x + 2 + app.input.len() as u16).min(area.right().saturating_sub(1));
-            let cursor_y =
-                (area.y + app.lines().len() as u16 - 1).min(area.bottom().saturating_sub(1));
+            let cursor_y = (area.y + prompt_index as u16).min(area.bottom().saturating_sub(1));
             frame.set_cursor_position((cursor_x, cursor_y));
         })?;
         if event::poll(Duration::from_millis(100))?
