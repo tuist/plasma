@@ -4,7 +4,9 @@ use clap::Parser;
 mod app;
 mod browser;
 mod cli;
+mod footer;
 mod input;
+mod oauth;
 mod theme;
 mod ui;
 

@@ -11,6 +11,8 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         return handle_escape(app);
     }
     match key.code {
+        KeyCode::Up => app.select_up(),
+        KeyCode::Down => app.select_down(),
         KeyCode::Char(character) => {
             app.input.push(character);
             app.recompute_show_commands();
@@ -19,7 +21,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             app.input.pop();
             app.recompute_show_commands();
         }
-        KeyCode::Enter => app.submit(),
+        KeyCode::Enter => app.confirm(),
         KeyCode::PageUp | KeyCode::PageDown => {}
         _ => {}
     }
@@ -27,12 +29,12 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
 }
 
 /// Esc clears the input if there is something to clear, cancels an ongoing
-/// flow (e.g. the API key prompt), or does nothing otherwise.
+/// flow (e.g. the API key prompt or a selection menu), or does nothing
+/// otherwise.
 fn handle_escape(app: &mut App) -> bool {
     if try_clear_or_cancel(app) {
         return true;
     }
-    // Esc with nothing pending is a no-op.
     true
 }
 
@@ -51,9 +53,15 @@ fn try_clear_or_cancel(app: &mut App) -> bool {
     if !app.input.is_empty() {
         app.input.clear();
         app.show_commands = false;
+        app.slash_selected = None;
         return true;
     }
-    if !app.is_normal() {
+    if app.is_in_menu() {
+        app.mode = AppMode::Normal;
+        app.push_info("Cancelled.");
+        return true;
+    }
+    if matches!(app.mode, AppMode::AwaitingApiKey { .. }) {
         app.mode = AppMode::Normal;
         app.push_info("Connection cancelled.");
         return true;
@@ -89,10 +97,11 @@ mod tests {
         assert!(keep_running);
         assert!(app.input.is_empty());
         assert!(!app.show_commands);
+        assert!(app.slash_selected.is_none());
     }
 
     #[test]
-    fn esc_cancels_ongoing_flow() {
+    fn esc_cancels_api_key_flow() {
         let mut app = App::empty();
         app.mode = AppMode::AwaitingApiKey {
             provider: "openrouter".into(),
@@ -101,11 +110,19 @@ mod tests {
         let keep_running = handle_escape(&mut app);
         assert!(keep_running);
         assert!(app.is_normal());
-        // The "Connection cancelled." message is pushed to the document.
         assert!(app
             .document
             .iter()
             .any(|line| format!("{line:?}").contains("Connection cancelled")));
+    }
+
+    #[test]
+    fn esc_cancels_selection_menu() {
+        let mut app = App::empty();
+        app.mode = AppMode::AwaitingConnectMethod { selected: 0 };
+        let keep_running = handle_escape(&mut app);
+        assert!(keep_running);
+        assert!(app.is_normal());
     }
 
     #[test]
@@ -131,7 +148,7 @@ mod tests {
     #[test]
     fn ctrl_c_cancels_ongoing_flow_without_quitting() {
         let mut app = App::empty();
-        app.mode = AppMode::AwaitingProvider;
+        app.mode = AppMode::AwaitingProvider { selected: 0 };
         let keep_running = handle_ctrl_c(&mut app);
         assert!(keep_running);
         assert!(app.is_normal());
@@ -145,6 +162,16 @@ mod tests {
     }
 
     // -- Routing through handle_key ----------------------------------------
+
+    #[test]
+    fn handle_key_up_down_navigate_menu() {
+        let mut app = App::empty();
+        app.mode = AppMode::AwaitingConnectMethod { selected: 0 };
+        handle_key(&mut app, key(KeyCode::Down));
+        assert!(matches!(app.mode, AppMode::AwaitingConnectMethod { selected: 1 }));
+        handle_key(&mut app, key(KeyCode::Up));
+        assert!(matches!(app.mode, AppMode::AwaitingConnectMethod { selected: 0 }));
+    }
 
     #[test]
     fn handle_key_routes_escape() {
@@ -189,9 +216,12 @@ mod tests {
         let mut app = App::empty();
         handle_key(&mut app, key(KeyCode::Char('/')));
         assert!(app.show_commands);
+        assert_eq!(app.slash_selected, Some(0));
         handle_key(&mut app, key(KeyCode::Char('h')));
         assert!(app.show_commands);
-        handle_key(&mut app, key(KeyCode::Char('x'))); // not a slash command
+        // Typing a non-matching character hides the menu.
+        handle_key(&mut app, key(KeyCode::Char('x')));
+        handle_key(&mut app, key(KeyCode::Char('x')));
         assert!(!app.show_commands);
     }
 }
