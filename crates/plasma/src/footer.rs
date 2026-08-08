@@ -202,23 +202,28 @@ fn shorten_path(path: &Path) -> String {
 }
 
 /// Build the spans shown on the right of the first footer row. When the
-/// worktree has an associated PR, the URL is appended after a
-/// `#link` annotation so terminals that support OSC 8 can be wired up
-/// later, and the visible text stays in the shared dim color.
+/// worktree has an associated PR, the visible text is wrapped in
+/// OSC 8 escape codes so terminals that support hyperlinks (kitty,
+/// WezTerm, recent iTerm2, etc.) make it clickable. The URL is
+/// carried only by the escape codes — it never appears in the
+/// rendered text.
 fn pr_spans(pr: &Option<PrInfo>) -> Vec<Span<'static>> {
     match pr {
         Some(pr) => {
             let prefix = if pr.is_draft { "Draft " } else { "" };
-            let mut text = format!(
+            let visible = format!(
                 "{prefix}PR #{n} \u{2014} {title} [{state}]",
                 prefix = prefix,
                 n = pr.number,
                 title = one_line(&pr.title, 60),
                 state = pr.state.label(),
             );
-            if !pr.url.is_empty() {
-                text.push_str(&format!("  (#link: {})", pr.url));
-            }
+            let text = if pr.url.is_empty() {
+                visible
+            } else {
+                // OSC 8 hyperlink: ESC ] 8 ; ; <url> ESC \ <label> ESC ] 8 ; ; ESC \
+                format!("\x1b]8;;{}\x1b\\{}\x1b]8;;\x1b\\", pr.url, visible)
+            };
             vec![Span::styled(text, DIM)]
         }
         None => vec![Span::styled("no PR associated".to_string(), DIM)],
@@ -495,7 +500,7 @@ mod tests {
     }
 
     #[test]
-    fn pr_spans_include_a_link_annotation_to_the_pr_url() {
+    fn pr_spans_wrap_the_visible_text_in_an_osc8_hyperlink() {
         let pr = PrInfo {
             number: 1,
             title: "feat: add Rust agent foundation".into(),
@@ -506,8 +511,32 @@ mod tests {
         let spans = pr_spans(&Some(pr));
         assert_eq!(spans.len(), 1);
         let text = spans[0].content.as_ref();
-        assert!(text.contains("PR #1"));
-        assert!(text.contains("https://github.com/tuist/plasma/pull/1"));
+        assert!(text.contains("PR #1"), "visible label missing: {text:?}");
+        assert!(text.contains("\x1b]8;;https://github.com/tuist/plasma/pull/1"),
+                "OSC 8 link opening missing: {text:?}");
+        assert!(text.ends_with("\x1b]8;;\x1b\\"),
+                "OSC 8 link closing missing: {text:?}");
+    }
+
+    #[test]
+    fn pr_spans_do_not_show_the_url_as_visible_text() {
+        let pr = PrInfo {
+            number: 1,
+            title: "feat: add Rust agent foundation".into(),
+            url: "https://github.com/tuist/plasma/pull/1".into(),
+            state: PrState::Open,
+            is_draft: false,
+        };
+        let spans = pr_spans(&Some(pr));
+        let text = spans[0].content.as_ref();
+        // The visible label is what the user reads. Anything between
+        // the OSC 8 opening and closing escapes is hyperlinked; the URL
+        // itself never appears as visible text.
+        let without_link = text
+            .replace("\x1b]8;;https://github.com/tuist/plasma/pull/1\x1b\\", "")
+            .replace("\x1b]8;;\x1b\\", "");
+        assert!(!without_link.contains("https://github.com/tuist/plasma/pull/1"));
+        assert!(without_link.contains("PR #1"));
     }
 
     #[test]

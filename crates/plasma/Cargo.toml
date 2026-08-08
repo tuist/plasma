@@ -18,4 +18,4 @@ plasma-tools = { path = "../plasma-tools" }
 ratatui.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-ureq.workspace = true
+ureq = { workspace = true, features = ["json"] }

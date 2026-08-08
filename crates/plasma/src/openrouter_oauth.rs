@@ -47,20 +47,22 @@ where
 }
 
 fn exchange_code(code: &str, verifier: &str) -> Result<String> {
-    let response = ureq::post(TOKEN_URL)
-        .set("accept", "application/json")
-        .set("content-type", "application/json")
-        .send_json(ureq::json!({
-            "code": code,
-            "code_verifier": verifier,
-            "code_challenge_method": "S256",
-        }))
+    let body = serde_json::json!({
+        "code": code,
+        "code_verifier": verifier,
+        "code_challenge_method": "S256",
+    });
+    let mut response = ureq::post(TOKEN_URL)
+        .header("accept", "application/json")
+        .header("content-type", "application/json")
+        .send_json(body)
         .map_err(|error| anyhow!("OpenRouter key exchange request failed: {error}"))?;
     let status = response.status();
     let body: serde_json::Value = response
-        .into_json()
+        .body_mut()
+        .read_json()
         .map_err(|error| anyhow!("OpenRouter key exchange returned invalid JSON: {error}"))?;
-    if !(200..300).contains(&status) {
+    if !(200..300).contains(&status.as_u16()) {
         let detail = body
             .get("error")
             .or_else(|| body.get("message"))

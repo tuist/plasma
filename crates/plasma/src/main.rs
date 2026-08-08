@@ -7,6 +7,8 @@ mod cli;
 mod footer;
 mod input;
 mod oauth;
+mod openrouter_oauth;
+mod rich_text;
 mod theme;
 mod ui;
 

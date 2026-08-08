@@ -7,7 +7,7 @@ use crossterm::{
 use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
-    layout::{Constraint, Layout},
+    layout::{Constraint, Layout, Rect},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
 };
@@ -66,71 +66,102 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()>
     Ok(())
 }
 
-fn draw(frame: &mut Frame, app: &App) {
-    let area = frame.area();
+/// One vertical slice of the TUI. The index into the layout's chunk
+/// array is fixed by construction so the renderer never has to do
+/// fragile arithmetic on the chunk count.
+#[derive(Clone, Copy)]
+enum Slot {
+    Document,
+    SlashMenu,
+    ConnectMenu,
+    Prompt,
+    Footer,
+}
+
+fn build_layout(area: Rect, app: &App) -> (Rect, Vec<(Slot, Rect)>) {
     let in_menu = app.is_in_menu();
     let show_slash = app.should_show_commands() && !in_menu;
-
-    let mut constraints = vec![Constraint::Min(0)];
+    let mut constraints: Vec<Constraint> = vec![Constraint::Min(0)];
+    let mut slots: Vec<Slot> = vec![Slot::Document];
     if in_menu {
         constraints.push(Constraint::Length(app.menu_height()));
-    } else {
-        if show_slash {
-            constraints.push(Constraint::Length(SLASH_MENU_HEIGHT));
-        }
-        constraints.push(Constraint::Length(PROMPT_BORDER_HEIGHT));
+        slots.push(Slot::ConnectMenu);
+    } else if show_slash {
+        constraints.push(Constraint::Length(SLASH_MENU_HEIGHT));
+        slots.push(Slot::SlashMenu);
     }
+    constraints.push(Constraint::Length(PROMPT_BORDER_HEIGHT));
+    slots.push(Slot::Prompt);
     constraints.push(Constraint::Length(FOOTER_HEIGHT));
+    slots.push(Slot::Footer);
     let chunks = Layout::vertical(constraints).split(area);
+    let pairs = slots
+        .into_iter()
+        .zip(chunks.iter().copied())
+        .collect();
+    (area, pairs)
+}
 
-    // Document history.
-    frame.render_widget(Paragraph::new(app.document_lines()), chunks[0]);
+fn draw(frame: &mut Frame, app: &App) {
+    let (area, slots) = build_layout(frame.area(), app);
+    let _ = area;
 
-    if in_menu {
-        // The prompt is replaced by a navigable selection menu wrapped in
-        // the same top/bottom border as the prompt so the layout still
-        // reads as "input area".
-        let menu_area = *chunks.last().expect("menu chunk is always present");
+    // The document is always present.
+    if let Some((_, area)) = slots.iter().find(|(slot, _)| matches!(slot, Slot::Document)) {
+        frame.render_widget(Paragraph::new(app.document_lines()), *area);
+    }
+
+    // Connect-flow selection menu, if any.
+    if let Some((_, area)) = slots
+        .iter()
+        .find(|(slot, _)| matches!(slot, Slot::ConnectMenu))
+    {
         let menu_block = Block::default()
             .borders(Borders::TOP | Borders::BOTTOM)
             .border_style(PROMPT_BORDER);
-        let inner = menu_block.inner(menu_area);
-        frame.render_widget(menu_block, menu_area);
+        let inner = menu_block.inner(*area);
+        frame.render_widget(menu_block, *area);
         frame.render_widget(Paragraph::new(app.menu_lines()), inner);
-        render_footer(frame, app, &chunks);
-        return;
     }
 
-    // Slash-command menu, if visible.
-    if show_slash {
-        let menu_index = chunks.len() - 2;
-        frame.render_widget(Paragraph::new(app.slash_menu_lines()), chunks[menu_index]);
+    // Slash-command menu, if any.
+    if let Some((_, area)) = slots
+        .iter()
+        .find(|(slot, _)| matches!(slot, Slot::SlashMenu))
+    {
+        frame.render_widget(Paragraph::new(app.slash_menu_lines()), *area);
     }
 
-    // Prompt with top and bottom borders so the input area is obvious.
-    let prompt_area = chunks[chunks.len() - 2];
-    let prompt_block = Block::default()
-        .borders(Borders::TOP | Borders::BOTTOM)
-        .border_style(PROMPT_BORDER);
-    let inner = prompt_block.inner(prompt_area);
-    let prompt_prefix = app.prompt_prefix();
-    let styled_prompt = Line::from(vec![
-        Span::styled(prompt_prefix.to_string(), PROMPT_PREFIX),
-        Span::raw(app.input.clone()),
-    ]);
-    frame.render_widget(prompt_block, prompt_area);
-    frame.render_widget(Paragraph::new(styled_prompt), inner);
+    // Prompt with top and bottom borders.
+    if let Some((_, prompt_area)) = slots
+        .iter()
+        .find(|(slot, _)| matches!(slot, Slot::Prompt))
+    {
+        let prompt_block = Block::default()
+            .borders(Borders::TOP | Borders::BOTTOM)
+            .border_style(PROMPT_BORDER);
+        let inner = prompt_block.inner(*prompt_area);
+        let prompt_prefix = app.prompt_prefix();
+        let styled_prompt = Line::from(vec![
+            Span::styled(prompt_prefix.to_string(), PROMPT_PREFIX),
+            Span::raw(app.input.clone()),
+        ]);
+        frame.render_widget(prompt_block, *prompt_area);
+        frame.render_widget(Paragraph::new(styled_prompt), inner);
 
-    let cursor_x = (inner.x + prompt_prefix.len() as u16 + app.input.len() as u16)
-        .min(inner.right().saturating_sub(1));
-    let cursor_y = inner.y;
-    frame.set_cursor_position((cursor_x, cursor_y));
+        let cursor_x =
+            (inner.x + prompt_prefix.len() as u16 + app.input.len() as u16)
+                .min(inner.right().saturating_sub(1));
+        let cursor_y = inner.y;
+        frame.set_cursor_position((cursor_x, cursor_y));
+    }
 
-    render_footer(frame, app, &chunks);
-}
-
-fn render_footer(frame: &mut Frame, app: &App, chunks: &[ratatui::layout::Rect]) {
-    let footer_area = *chunks.last().expect("footer chunk is always present");
-    let lines = app.footer.lines(footer_area.width);
-    frame.render_widget(Paragraph::new(lines), footer_area);
+    // Footer.
+    if let Some((_, footer_area)) = slots
+        .iter()
+        .find(|(slot, _)| matches!(slot, Slot::Footer))
+    {
+        let lines = app.footer.lines(footer_area.width);
+        frame.render_widget(Paragraph::new(lines), *footer_area);
+    }
 }

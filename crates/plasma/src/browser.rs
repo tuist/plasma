@@ -6,7 +6,7 @@
 
 use std::fmt::Debug;
 
-pub trait BrowserOpener: Debug {
+pub trait BrowserOpener: Debug + Send {
     fn open(&self, url: &str);
 }
 

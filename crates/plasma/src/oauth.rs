@@ -64,7 +64,7 @@ pub fn generate_pkce() -> PkcePair {
 
 /// State a one-shot loopback callback can be in.
 #[derive(Debug)]
-enum CallbackResult {
+pub enum CallbackResult {
     Code(String),
 }
 

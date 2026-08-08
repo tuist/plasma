@@ -15,6 +15,8 @@ use serde_json::Value;
 
 use crate::browser::{BrowserOpener, SystemBrowser};
 use crate::footer::Footer;
+use crate::openrouter_oauth as oauth_flow;
+use crate::rich_text::{RichSpan, RichText};
 use crate::theme::{
     AGENT_TEXT, MENU_HINT, SELECTED, SLASH_COMMAND, SUCCESS, TITLE, TOOL_BODY,
     TOOL_ERROR, TOOL_NAME, TOOL_RESULT,
@@ -99,9 +101,13 @@ impl App {
             Line::from(""),
         ];
         if app.session.is_none() {
-            app.document.push(Line::from(
-                "Type /connect to connect your account, or a prompt to start.",
-            ));
+            app.document.push(
+                RichText::new()
+                    .push_str("Type ")
+                    .push_command("/connect")
+                    .push_str(" to connect your account, or a prompt to start.")
+                    .into_line(),
+            );
         }
         app.footer = Footer::new(working_dir);
         app
@@ -168,9 +174,20 @@ impl App {
             .map(|(index, command)| {
                 let is_selected = self.slash_selected == Some(index);
                 let prefix = if is_selected { "→ " } else { "  " };
-                let line = format!("{prefix}/{:<10} {}", command.name, command.description);
-                let style = if is_selected { SELECTED } else { SLASH_COMMAND };
-                Line::from(Span::styled(line, style))
+                let mut line = RichText::new()
+                    .push_str(prefix)
+                    .push_str("/")
+                    .push_command(command.name)
+                    .push_str(&format!(" {:<8}", ""))
+                    .push_str(command.description);
+                if is_selected {
+                    line = line.push_strong("");
+                }
+                let mut ratatui_line = line.into_line();
+                if !is_selected {
+                    ratatui_line = ratatui_line.patch_style(SLASH_COMMAND);
+                }
+                ratatui_line
             })
             .collect()
     }
@@ -346,7 +363,7 @@ impl App {
                 self.begin_api_key_input("openrouter", false);
             }
             (AppMode::AwaitingProvider { .. }, "openrouter") => {
-                self.begin_api_key_input("openrouter", true);
+                self.begin_oauth_flow("openrouter");
             }
             _ => {}
         }
@@ -483,6 +500,24 @@ impl App {
             }
             _ => {
                 self.push_info("Saved the key, but could not load the provider.");
+                self.mode = AppMode::Normal;
+            }
+        }
+    }
+
+    /// Run the OpenRouter OAuth flow: open the authorize URL in the host
+    /// browser, wait for the loopback callback, exchange the code for a
+    /// permanent API key, and save it. On failure, fall back to a normal
+    /// prompt with an error message so the user is not stuck.
+    fn begin_oauth_flow(&mut self, provider: &str) {
+        let key = {
+            let browser = &self.browser;
+            oauth_flow::login(|url| browser.open(url))
+        };
+        match key {
+            Ok(key) => self.finalize_connect(provider, true, &key),
+            Err(error) => {
+                self.push_info(format!("OpenRouter sign-in failed: {error}"));
                 self.mode = AppMode::Normal;
             }
         }
@@ -813,16 +848,38 @@ mod tests {
     }
 
     #[test]
-    fn menu_confirm_openrouter_opens_browser_and_enters_api_key() {
-        let (mut app, recorder) = app_with_recorder();
-        app.mode = AppMode::AwaitingProvider { selected: 0 };
-        app.confirm();
-        assert!(matches!(
-            app.mode,
-            AppMode::AwaitingApiKey { opened_browser: true, .. }
-        ));
-        let opened = recorder.opened.lock().unwrap();
-        assert_eq!(opened.as_slice(), &["https://openrouter.ai/keys".to_string()]);
+    fn menu_confirm_openrouter_opens_browser_via_oauth() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        let opened = Arc::new(AtomicBool::new(false));
+        struct FlagBrowser(Arc<AtomicBool>);
+        impl std::fmt::Debug for FlagBrowser {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.debug_struct("FlagBrowser").finish()
+            }
+        }
+        impl BrowserOpener for FlagBrowser {
+            fn open(&self, _url: &str) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let opened_for_browser = Arc::clone(&opened);
+        let app = App::empty().with_browser(Box::new(FlagBrowser(opened_for_browser)));
+        let mut app = app;
+        // The OAuth flow is blocking — it waits for the loopback callback.
+        // We run it on a thread and give it a moment to open the browser
+        // before letting it give up on the absent callback.
+        std::thread::spawn(move || {
+            app.mode = AppMode::AwaitingProvider { selected: 0 };
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| app.confirm()));
+        });
+        // Give the OAuth flow a moment to call `browser.open` before the
+        // loopback server gives up waiting for the callback.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(
+            opened.load(Ordering::SeqCst),
+            "OAuth flow should have opened the browser before waiting on the callback"
+        );
     }
 
     #[test]
