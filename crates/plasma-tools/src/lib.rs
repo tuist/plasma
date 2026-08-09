@@ -219,9 +219,7 @@ mod tests {
 
     #[test]
     fn read_tool_rejects_missing_path() {
-        let tool = ReadTool {
-            root: temp_root(),
-        };
+        let tool = ReadTool { root: temp_root() };
         let result = tool.execute(&json!({}));
         assert!(result.is_err());
     }

@@ -11,10 +11,7 @@ pub enum AgentEvent {
     /// The model emitted text. It may be interleaved with tool calls.
     Text(String),
     /// The model asked the host to run a tool.
-    ToolCall {
-        name: String,
-        arguments: String,
-    },
+    ToolCall { name: String, arguments: String },
     /// The host ran a tool and is feeding the result back to the model.
     ToolResult {
         name: String,
@@ -68,7 +65,9 @@ impl<P: InferenceProvider> Session<P> {
     {
         self.history.push(Message::user(prompt));
         for _ in 0..MAX_AGENT_ITERATIONS {
-            let response = self.provider.complete(&self.history, tool_definitions.as_ref())?;
+            let response = self
+                .provider
+                .complete(&self.history, tool_definitions.as_ref())?;
             // Emit any text the model produced alongside tool calls.
             if !response.content.is_empty() {
                 on_event(AgentEvent::Text(response.content.clone()));
