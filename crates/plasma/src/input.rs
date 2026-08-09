@@ -22,7 +22,8 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             app.recompute_show_commands();
         }
         KeyCode::Enter => app.confirm(),
-        KeyCode::PageUp | KeyCode::PageDown => {}
+        KeyCode::PageUp => app.scroll_document_up(),
+        KeyCode::PageDown => app.scroll_document_down(),
         _ => {}
     }
     true
@@ -110,10 +111,11 @@ mod tests {
         let keep_running = handle_escape(&mut app);
         assert!(keep_running);
         assert!(app.is_normal());
-        assert!(app
-            .document
-            .iter()
-            .any(|line| format!("{line:?}").contains("Connection cancelled")));
+        assert!(
+            app.document
+                .iter()
+                .any(|line| format!("{line:?}").contains("Connection cancelled"))
+        );
     }
 
     #[test]
@@ -168,9 +170,15 @@ mod tests {
         let mut app = App::empty();
         app.mode = AppMode::AwaitingConnectMethod { selected: 0 };
         handle_key(&mut app, key(KeyCode::Down));
-        assert!(matches!(app.mode, AppMode::AwaitingConnectMethod { selected: 1 }));
+        assert!(matches!(
+            app.mode,
+            AppMode::AwaitingConnectMethod { selected: 1 }
+        ));
         handle_key(&mut app, key(KeyCode::Up));
-        assert!(matches!(app.mode, AppMode::AwaitingConnectMethod { selected: 0 }));
+        assert!(matches!(
+            app.mode,
+            AppMode::AwaitingConnectMethod { selected: 0 }
+        ));
     }
 
     #[test]
@@ -201,6 +209,18 @@ mod tests {
         let mut app = app_with_input("hi");
         handle_key(&mut app, key(KeyCode::Backspace));
         assert_eq!(app.input, "h");
+    }
+
+    #[test]
+    fn page_keys_scroll_the_transcript() {
+        let mut app = App::empty();
+        app.document = (0..10)
+            .map(|index| format!("line {index}").into())
+            .collect();
+        handle_key(&mut app, key(KeyCode::PageUp));
+        assert_eq!(app.document_scroll(2), 5);
+        handle_key(&mut app, key(KeyCode::PageDown));
+        assert_eq!(app.document_scroll(2), 8);
     }
 
     #[test]

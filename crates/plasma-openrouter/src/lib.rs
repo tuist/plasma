@@ -1,9 +1,4 @@
-use std::{
-    fs, io,
-    path::PathBuf,
-    sync::OnceLock,
-    time::Duration,
-};
+use std::{fs, io, path::PathBuf, sync::OnceLock, time::Duration};
 
 use directories::ProjectDirs;
 use plasma_inference::{InferenceError, InferenceProvider, ToolDefinition};
@@ -48,6 +43,11 @@ impl OpenRouterInferenceProvider {
 
     pub fn from_saved_key() -> io::Result<Option<Self>> {
         load_key().map(|key| key.map(Self::new))
+    }
+
+    /// Identifier shown in the conversation transcript for this provider.
+    pub fn model_name(&self) -> &str {
+        &self.model
     }
 
     /// Confirm the key authenticates against `/api/v1/auth/key`. Used
@@ -95,10 +95,7 @@ impl InferenceProvider for OpenRouterInferenceProvider {
         history: &[Message],
         tools: &[ToolDefinition],
     ) -> Result<Message, InferenceError> {
-        let messages: Vec<Value> = history
-            .iter()
-            .map(message_to_openai)
-            .collect();
+        let messages: Vec<Value> = history.iter().map(message_to_openai).collect();
         let tools_payload: Vec<Value> = tools
             .iter()
             .map(|tool| {
@@ -260,9 +257,7 @@ fn map_ureq_error(error: ureq::Error) -> InferenceError {
         ureq::Error::StatusCode(status) => {
             InferenceError::Request(format!("OpenRouter returned HTTP {status}"))
         }
-        ureq::Error::Timeout(_) => {
-            InferenceError::Request("OpenRouter request timed out.".into())
-        }
+        ureq::Error::Timeout(_) => InferenceError::Request("OpenRouter request timed out.".into()),
         other => InferenceError::Request(other.to_string()),
     }
 }
@@ -270,16 +265,15 @@ fn map_ureq_error(error: ureq::Error) -> InferenceError {
 // Indirection so tests can redirect the auth-key URL to a mock server
 // without exposing a public setter. `validate` looks at this first,
 // then falls back to the real OpenRouter endpoint.
-static AUTH_KEY_URL_OVERRIDE: std::sync::Mutex<Option<String>> =
-    std::sync::Mutex::new(None);
+static AUTH_KEY_URL_OVERRIDE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread;
 
     /// Spin up a single-shot HTTP server on localhost that replies with
@@ -326,7 +320,10 @@ mod tests {
         use std::sync::Mutex;
         static LOCK: Mutex<()> = Mutex::new(());
         let _guard = LOCK.lock().unwrap();
-        let previous = AUTH_KEY_URL_OVERRIDE.lock().unwrap().replace(url.to_string());
+        let previous = AUTH_KEY_URL_OVERRIDE
+            .lock()
+            .unwrap()
+            .replace(url.to_string());
         body();
         *AUTH_KEY_URL_OVERRIDE.lock().unwrap() = previous;
     }
@@ -386,8 +383,7 @@ mod tests {
 
     #[test]
     fn validate_returns_ok_for_a_2xx_response() {
-        let (base, counter) =
-            spawn_mock_server(200, r#"{"data":{"label":"test-key"}}"#);
+        let (base, counter) = spawn_mock_server(200, r#"{"data":{"label":"test-key"}}"#);
         with_auth_url(&format!("{base}/api/v1/auth/key"), || {
             let provider = OpenRouterInferenceProvider::new("sk-or-v1-test");
             let result = provider.validate();
@@ -398,10 +394,8 @@ mod tests {
 
     #[test]
     fn validate_rejects_401_with_a_reauth_hint() {
-        let (base, _counter) = spawn_mock_server(
-            401,
-            r#"{"error":{"message":"User not found.","code":401}}"#,
-        );
+        let (base, _counter) =
+            spawn_mock_server(401, r#"{"error":{"message":"User not found.","code":401}}"#);
         with_auth_url(&format!("{base}/api/v1/auth/key"), || {
             let provider = OpenRouterInferenceProvider::new("sk-or-v1-stale");
             let message = provider.validate().expect_err("expected 401 error");

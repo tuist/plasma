@@ -40,35 +40,6 @@ struct FooterState {
 #[derive(Clone, Debug)]
 struct PrInfo {
     number: u64,
-    title: String,
-    url: String,
-    state: PrState,
-    is_draft: bool,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PrState {
-    Open,
-    Merged,
-    Closed,
-}
-
-impl PrState {
-    fn parse(value: &str) -> Self {
-        match value.to_ascii_uppercase().as_str() {
-            "MERGED" => Self::Merged,
-            "CLOSED" => Self::Closed,
-            _ => Self::Open,
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Open => "open",
-            Self::Merged => "merged",
-            Self::Closed => "closed",
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -101,33 +72,20 @@ impl Footer {
         }
     }
 
-    /// Render the footer as a stack of `Line`s. The caller decides how
-    /// many rows to actually display.
+    /// Render one compact status line. Pull-request data is deliberately
+    /// omitted because the host application already owns that presentation.
     pub fn lines(&self, width: u16) -> Vec<Line<'static>> {
         let state = self.state.lock().expect("footer mutex poisoned").clone();
-        let mut lines = Vec::new();
-
-        // Line 1: worktree path + branch on the left, PR summary on the
-        // right. The PR summary is an OSC 8 hyperlink on terminals that
-        // support it.
-        let left = format!(
+        let mut left = format!(
             "{} ({})",
             shorten_path(&self.working_dir),
             state.branch.as_deref().unwrap_or("detached"),
         );
-        lines.push(line_with_right_spans(width, &left, pr_spans(&state.pr), DIM));
-
-        // Line 2: CI counts on the left (hidden entirely when there are
-        // no checks yet), model info on the right.
-        let ci_summary = state.ci.as_ref().and_then(|ci| format_ci(*ci));
-        lines.push(line_with_right_spans(
-            width,
-            ci_summary.as_deref().unwrap_or(""),
-            model_spans(),
-            DIM,
-        ));
-
-        lines
+        if let Some(ci_summary) = state.ci.as_ref().and_then(|ci| format_ci(*ci)) {
+            left.push_str(" · ");
+            left.push_str(&ci_summary);
+        }
+        vec![line_with_right_spans(width, &left, model_spans(), DIM)]
     }
 }
 
@@ -193,41 +151,9 @@ fn shorten_path(path: &Path) -> String {
     // the footer.
     let components: Vec<&str> = display.split('/').filter(|c| !c.is_empty()).collect();
     if components.len() > 3 {
-        display = format!(
-            "\u{2026}/{}",
-            components[components.len() - 2..].join("/")
-        );
+        display = format!("\u{2026}/{}", components[components.len() - 2..].join("/"));
     }
     display
-}
-
-/// Build the spans shown on the right of the first footer row. When the
-/// worktree has an associated PR, the visible text is wrapped in
-/// OSC 8 escape codes so terminals that support hyperlinks (kitty,
-/// WezTerm, recent iTerm2, etc.) make it clickable. The URL is
-/// carried only by the escape codes — it never appears in the
-/// rendered text.
-fn pr_spans(pr: &Option<PrInfo>) -> Vec<Span<'static>> {
-    match pr {
-        Some(pr) => {
-            let prefix = if pr.is_draft { "Draft " } else { "" };
-            let visible = format!(
-                "{prefix}PR #{n} \u{2014} {title} [{state}]",
-                prefix = prefix,
-                n = pr.number,
-                title = one_line(&pr.title, 60),
-                state = pr.state.label(),
-            );
-            let text = if pr.url.is_empty() {
-                visible
-            } else {
-                // OSC 8 hyperlink: ESC ] 8 ; ; <url> ESC \ <label> ESC ] 8 ; ; ESC \
-                format!("\x1b]8;;{}\x1b\\{}\x1b]8;;\x1b\\", pr.url, visible)
-            };
-            vec![Span::styled(text, DIM)]
-        }
-        None => vec![Span::styled("no PR associated".to_string(), DIM)],
-    }
 }
 
 /// Right-hand side of the second footer row. Always present so the
@@ -258,11 +184,6 @@ fn format_ci(ci: CiStatus) -> Option<String> {
     } else {
         Some(format!("CI: {}", parts.join(", ")))
     }
-}
-
-fn one_line(input: &str, max: usize) -> String {
-    let cleaned = input.replace('\n', " ").replace('\r', "");
-    truncate(&cleaned, max)
 }
 
 // -- Background refresh -------------------------------------------------------
@@ -297,29 +218,18 @@ fn refresh_once(working_dir: &Path, state: &Arc<Mutex<FooterState>>) {
 }
 
 fn git_branch(working_dir: &Path) -> Option<String> {
-    run_command(
-        "git",
-        &["rev-parse", "--abbrev-ref", "HEAD"],
-        working_dir,
-    )
-    .ok()
-    .filter(|output| !output.is_empty())
+    run_command("git", &["rev-parse", "--abbrev-ref", "HEAD"], working_dir)
+        .ok()
+        .filter(|output| !output.is_empty())
 }
 
 fn gh_pr_view(working_dir: &Path, branch: &str) -> anyhow::Result<Option<PrInfo>> {
     let Some(output) = run_command(
         "gh",
-        &[
-            "pr",
-            "view",
-            branch,
-            "--json",
-            "number,title,url,state,isDraft",
-        ],
+        &["pr", "view", branch, "--json", "number"],
         working_dir,
     )
-    .ok()
-    else {
+    .ok() else {
         return Ok(None);
     };
     if output.is_empty() {
@@ -330,32 +240,7 @@ fn gh_pr_view(working_dir: &Path, branch: &str) -> anyhow::Result<Option<PrInfo>
         .get("number")
         .and_then(serde_json::Value::as_u64)
         .ok_or_else(|| anyhow::anyhow!("missing PR number"))?;
-    let title = parsed
-        .get("title")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    let url = parsed
-        .get("url")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    let state = parsed
-        .get("state")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("OPEN")
-        .to_string();
-    let is_draft = parsed
-        .get("isDraft")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
-    Ok(Some(PrInfo {
-        number,
-        title,
-        url,
-        state: PrState::parse(&state),
-        is_draft,
-    }))
+    Ok(Some(PrInfo { number }))
 }
 
 fn gh_pr_checks(working_dir: &Path, number: u64) -> anyhow::Result<Option<CiStatus>> {
@@ -414,10 +299,7 @@ fn run_command(program: &str, args: &[&str], working_dir: &Path) -> anyhow::Resu
         match child.try_wait()? {
             Some(status) => {
                 if !status.success() {
-                    anyhow::bail!(
-                        "{program} {} exited with {status}",
-                        args.join(" ")
-                    );
+                    anyhow::bail!("{program} {} exited with {status}", args.join(" "));
                 }
                 let mut output = String::new();
                 if let Some(mut stdout) = child.stdout.take() {
@@ -487,70 +369,15 @@ mod tests {
     }
 
     #[test]
-    fn footer_lines_omit_ci_when_no_checks() {
+    fn footer_is_one_line_and_omits_ci_when_no_checks() {
         let footer = Footer::new(PathBuf::from("."));
-        // No PR, no CI: the second line should have an empty left side.
+        // No pull request or checks should introduce a second status row.
         let lines = footer.lines(120);
-        assert_eq!(lines.len(), 2);
-        let second = lines[1].to_string();
+        assert_eq!(lines.len(), 1);
+        let footer_line = lines[0].to_string();
         assert!(
-            !second.contains("CI"),
-            "CI placeholder should be hidden when there are no checks; got {second:?}"
+            !footer_line.contains("CI"),
+            "CI placeholder should be hidden when there are no checks; got {footer_line:?}"
         );
-    }
-
-    #[test]
-    fn pr_spans_wrap_the_visible_text_in_an_osc8_hyperlink() {
-        let pr = PrInfo {
-            number: 1,
-            title: "feat: add Rust agent foundation".into(),
-            url: "https://github.com/tuist/plasma/pull/1".into(),
-            state: PrState::Open,
-            is_draft: false,
-        };
-        let spans = pr_spans(&Some(pr));
-        assert_eq!(spans.len(), 1);
-        let text = spans[0].content.as_ref();
-        assert!(text.contains("PR #1"), "visible label missing: {text:?}");
-        assert!(text.contains("\x1b]8;;https://github.com/tuist/plasma/pull/1"),
-                "OSC 8 link opening missing: {text:?}");
-        assert!(text.ends_with("\x1b]8;;\x1b\\"),
-                "OSC 8 link closing missing: {text:?}");
-    }
-
-    #[test]
-    fn pr_spans_do_not_show_the_url_as_visible_text() {
-        let pr = PrInfo {
-            number: 1,
-            title: "feat: add Rust agent foundation".into(),
-            url: "https://github.com/tuist/plasma/pull/1".into(),
-            state: PrState::Open,
-            is_draft: false,
-        };
-        let spans = pr_spans(&Some(pr));
-        let text = spans[0].content.as_ref();
-        // The visible label is what the user reads. Anything between
-        // the OSC 8 opening and closing escapes is hyperlinked; the URL
-        // itself never appears as visible text.
-        let without_link = text
-            .replace("\x1b]8;;https://github.com/tuist/plasma/pull/1\x1b\\", "")
-            .replace("\x1b]8;;\x1b\\", "");
-        assert!(!without_link.contains("https://github.com/tuist/plasma/pull/1"));
-        assert!(without_link.contains("PR #1"));
-    }
-
-    #[test]
-    fn pr_spans_fall_back_to_dim_text_when_no_pr() {
-        let spans = pr_spans(&None);
-        assert_eq!(spans.len(), 1);
-        assert_eq!(spans[0].style.fg, Some(Color::DarkGray));
-    }
-
-    #[test]
-    fn pr_state_parses_known_values() {
-        assert_eq!(PrState::parse("OPEN"), PrState::Open);
-        assert_eq!(PrState::parse("merged"), PrState::Merged);
-        assert_eq!(PrState::parse("CLOSED"), PrState::Closed);
-        assert_eq!(PrState::parse("unknown"), PrState::Open);
     }
 }

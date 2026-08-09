@@ -1,6 +1,6 @@
 use anyhow::Result;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind, MouseEventKind},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -15,11 +15,11 @@ use std::{io, time::Duration};
 
 use crate::app::App;
 use crate::input;
-use crate::theme::{PROMPT_BORDER, PROMPT_PREFIX};
+use crate::theme::THEME;
 
 const SLASH_MENU_HEIGHT: u16 = 5;
 const PROMPT_BORDER_HEIGHT: u16 = 3; // top border + content + bottom border
-const FOOTER_HEIGHT: u16 = 2;
+const FOOTER_HEIGHT: u16 = 1;
 const FRAME_INTERVAL: Duration = Duration::from_millis(40);
 
 pub fn run() -> Result<()> {
@@ -57,6 +57,12 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()>
                     if !input::handle_key(&mut app, key) {
                         app.should_exit = true;
                     }
+                }
+                Event::Mouse(mouse) if matches!(mouse.kind, MouseEventKind::ScrollUp) => {
+                    app.scroll_document_up();
+                }
+                Event::Mouse(mouse) if matches!(mouse.kind, MouseEventKind::ScrollDown) => {
+                    app.scroll_document_down();
                 }
                 _ => {}
             }
@@ -104,14 +110,12 @@ fn build_layout(area: Rect, app: &App) -> (Rect, Vec<(Slot, Rect)>) {
     constraints.push(Constraint::Length(FOOTER_HEIGHT));
     slots.push(Slot::Footer);
     let chunks = Layout::vertical(constraints).split(area);
-    let pairs = slots
-        .into_iter()
-        .zip(chunks.iter().copied())
-        .collect();
+    let pairs = slots.into_iter().zip(chunks.iter().copied()).collect();
     (area, pairs)
 }
 
-pub(crate) fn slots_for(app: &App, area: Rect) -> Vec<Slot> {
+#[cfg(test)]
+fn slots_for(app: &App, area: Rect) -> Vec<Slot> {
     let (_, pairs) = build_layout(area, app);
     pairs.into_iter().map(|(slot, _)| slot).collect()
 }
@@ -121,8 +125,14 @@ fn draw(frame: &mut Frame, app: &App) {
     let _ = area;
 
     // The document is always present.
-    if let Some((_, area)) = slots.iter().find(|(slot, _)| matches!(slot, Slot::Document)) {
-        frame.render_widget(Paragraph::new(app.document_lines()), *area);
+    if let Some((_, area)) = slots
+        .iter()
+        .find(|(slot, _)| matches!(slot, Slot::Document))
+    {
+        frame.render_widget(
+            Paragraph::new(app.document_lines()).scroll((app.document_scroll(area.height), 0)),
+            *area,
+        );
     }
 
     // Connect-flow selection menu, if any.
@@ -132,7 +142,7 @@ fn draw(frame: &mut Frame, app: &App) {
     {
         let menu_block = Block::default()
             .borders(Borders::TOP | Borders::BOTTOM)
-            .border_style(PROMPT_BORDER);
+            .border_style(THEME.border());
         let inner = menu_block.inner(*area);
         frame.render_widget(menu_block, *area);
         frame.render_widget(Paragraph::new(app.menu_lines()), inner);
@@ -147,31 +157,33 @@ fn draw(frame: &mut Frame, app: &App) {
     }
 
     // Prompt with top and bottom borders.
-    if let Some((_, prompt_area)) = slots
-        .iter()
-        .find(|(slot, _)| matches!(slot, Slot::Prompt))
-    {
+    if let Some((_, prompt_area)) = slots.iter().find(|(slot, _)| matches!(slot, Slot::Prompt)) {
         let prompt_block = Block::default()
             .borders(Borders::TOP | Borders::BOTTOM)
-            .border_style(PROMPT_BORDER);
+            .border_style(THEME.border());
         let inner = prompt_block.inner(*prompt_area);
         let prompt_prefix = app.prompt_prefix();
-        // While a request is in flight we render the "Thinking…"
-        // message instead of the user's input — they already submitted
-        // it, and showing the same text again would imply we hadn't
-        // received it.
+        // While a request is in flight we keep the prompt calm and put the
+        // activity indicator in its top border, where it does not compete
+        // with the conversation transcript.
         let body: Line = if app.pending {
-            Line::from(Span::styled(
-                "Thinking\u{2026}",
-                crate::theme::THINKING,
-            ))
+            Line::default()
         } else {
             Line::from(vec![
-                Span::styled(prompt_prefix.to_string(), PROMPT_PREFIX),
+                Span::styled(prompt_prefix.to_string(), THEME.prompt_prefix()),
                 Span::raw(app.input.clone()),
             ])
         };
         frame.render_widget(prompt_block, *prompt_area);
+        if app.pending {
+            frame.render_widget(
+                Paragraph::new(prompt_progress_line(
+                    prompt_area.width,
+                    app.pending_elapsed(),
+                )),
+                Rect::new(prompt_area.x, prompt_area.y, prompt_area.width, 1),
+            );
+        }
         frame.render_widget(Paragraph::new(body), inner);
 
         let cursor_x = if app.pending {
@@ -186,13 +198,38 @@ fn draw(frame: &mut Frame, app: &App) {
     }
 
     // Footer.
-    if let Some((_, footer_area)) = slots
-        .iter()
-        .find(|(slot, _)| matches!(slot, Slot::Footer))
-    {
+    if let Some((_, footer_area)) = slots.iter().find(|(slot, _)| matches!(slot, Slot::Footer)) {
         let lines = app.footer.lines(footer_area.width);
         frame.render_widget(Paragraph::new(lines), *footer_area);
     }
+}
+
+/// A short accent segment travels along the prompt's top rule while work is
+/// in flight. It replaces a permanent "thinking" transcript entry.
+fn prompt_progress_line(width: u16, elapsed: Duration) -> Line<'static> {
+    let width = usize::from(width);
+    if width == 0 {
+        return Line::default();
+    }
+    const SEGMENT_WIDTH: usize = 6;
+    const FRAME_MILLIS: u128 = 80;
+    let position = ((elapsed.as_millis() / FRAME_MILLIS) as usize + 1) % (width + SEGMENT_WIDTH);
+    let start = position.saturating_sub(SEGMENT_WIDTH.saturating_sub(1));
+    let end = position.min(width);
+    let mut spans = Vec::with_capacity(3);
+    if start > 0 {
+        spans.push(Span::styled("─".repeat(start), THEME.border()));
+    }
+    if end > start {
+        spans.push(Span::styled(
+            "━".repeat(end - start),
+            THEME.activity_marker(),
+        ));
+    }
+    if end < width {
+        spans.push(Span::styled("─".repeat(width - end), THEME.border()));
+    }
+    Line::from(spans)
 }
 
 #[cfg(test)]
@@ -201,7 +238,9 @@ mod tests {
     use crate::app::App;
 
     fn has_slot(slots: &[Slot], target: Slot) -> bool {
-        slots.iter().any(|slot| std::mem::discriminant(slot) == std::mem::discriminant(&target))
+        slots
+            .iter()
+            .any(|slot| std::mem::discriminant(slot) == std::mem::discriminant(&target))
     }
 
     #[test]
@@ -224,7 +263,10 @@ mod tests {
         assert!(has_slot(&slots, Slot::Document));
         assert!(has_slot(&slots, Slot::ConnectMenu));
         assert!(has_slot(&slots, Slot::Footer));
-        assert!(!has_slot(&slots, Slot::Prompt), "guided menu should hide the prompt");
+        assert!(
+            !has_slot(&slots, Slot::Prompt),
+            "guided menu should hide the prompt"
+        );
     }
 
     #[test]
@@ -233,7 +275,10 @@ mod tests {
         app.mode = crate::app::AppMode::AwaitingProvider { selected: 0 };
         let area = Rect::new(0, 0, 80, 24);
         let slots = slots_for(&app, area);
-        assert!(!has_slot(&slots, Slot::Prompt), "provider menu should hide the prompt");
+        assert!(
+            !has_slot(&slots, Slot::Prompt),
+            "provider menu should hide the prompt"
+        );
     }
 
     #[test]
@@ -245,7 +290,10 @@ mod tests {
         };
         let area = Rect::new(0, 0, 80, 24);
         let slots = slots_for(&app, area);
-        assert!(has_slot(&slots, Slot::Prompt), "API key mode needs the prompt");
+        assert!(
+            has_slot(&slots, Slot::Prompt),
+            "API key mode needs the prompt"
+        );
     }
 
     #[test]
@@ -263,6 +311,24 @@ mod tests {
             .iter()
             .position(|slot| matches!(slot, Slot::Prompt))
             .expect("prompt should be present");
-        assert!(slash_index < prompt_index, "slash menu must sit above the prompt");
+        assert!(
+            slash_index < prompt_index,
+            "slash menu must sit above the prompt"
+        );
+    }
+
+    #[test]
+    fn prompt_progress_line_has_a_moving_accent_segment() {
+        let first = prompt_progress_line(20, Duration::ZERO);
+        let later = prompt_progress_line(20, Duration::from_millis(400));
+        assert_eq!(first.to_string().chars().count(), 20);
+        assert_eq!(later.to_string().chars().count(), 20);
+        assert!(
+            first
+                .spans
+                .iter()
+                .any(|span| span.style.fg == Some(THEME.colors.accent))
+        );
+        assert_ne!(first.to_string(), later.to_string());
     }
 }
