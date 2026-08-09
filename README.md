@@ -1,40 +1,18 @@
 # Plasma
 
-🪐 A coding agent for your terminal.
+🪐 Fast, simple, and extensible coding agents for your terminal.
 
-## Get started
+Plasma is designed both as an end product and as a modular foundation: use it directly, or reuse its internals to build your own agents and tools. It is built for maximum portability across platforms, including [WebAssembly](https://webassembly.org/).
 
-Plasma needs Rust 1.91 or later.
+## Install
 
-```sh
-cargo run -p plasma
-```
-
-Type `/connect` and follow the sign-in flow. Once connected, type a request and press Enter.
-
-Use `/` to browse the available commands.
-
-## Install with mise
-
-[mise](https://mise.jdx.dev/) can install Plasma directly from the release
-artifacts published on [GitHub Releases](https://github.com/tuist/plasma/releases):
+Install Plasma globally with [mise](https://mise.jdx.dev/):
 
 ```sh
 mise use -g github:tuist/plasma
 ```
 
-This installs the latest release globally. To add Plasma to a project's
-`mise.toml`, run `mise use github:tuist/plasma` from that project instead.
-
-## Connect from a script
-
-If you already have an OpenRouter key, you can connect without opening the terminal interface:
-
-```sh
-cargo run -p plasma -- connect openrouter --api-key "$OPENROUTER_API_KEY"
-```
-
-Your key is stored in your operating system's configuration directory and is readable only by your user account on Unix-like systems.
+Run `plasma`, then type `/connect` and follow the sign-in flow. Once connected, type a request and press Enter. Use `/` to browse the available commands.
 
 ## License
 
