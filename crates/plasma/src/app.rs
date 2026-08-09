@@ -177,19 +177,22 @@ impl App {
                 // Pad the command name so the description column lines up
                 // regardless of which entry is selected.
                 let padded_name = format!("{:<10}", command.name);
+                // Every row uses the same cyan for the command name and
+                // description; the selected row is bolded so the arrow is
+                // the only thing that changes. `patch_style` overwrites
+                // modifiers rather than merging them, so the colour must
+                // be applied first and the bold second.
                 let mut line = RichText::new()
                     .push_str(prefix)
                     .push_str("/")
                     .push_command(padded_name)
-                    .push_str(command.description);
+                    .push_str(command.description)
+                    .into_line();
+                line = line.patch_style(SLASH_COMMAND);
                 if is_selected {
-                    line = line.push_strong("");
+                    line = line.patch_style(Style::default().add_modifier(Modifier::BOLD));
                 }
-                let mut ratatui_line = line.into_line();
-                if !is_selected {
-                    ratatui_line = ratatui_line.patch_style(SLASH_COMMAND);
-                }
-                ratatui_line
+                line
             })
             .collect()
     }
@@ -983,5 +986,27 @@ mod tests {
             columns.iter().all(|c| *c == first),
             "description columns should all match, got {columns:?}"
         );
+    }
+
+    #[test]
+    fn slash_menu_lines_bold_the_selected_entry() {
+        let mut app = test_app();
+        app.input = "/".into();
+        app.recompute_show_commands();
+        let lines = app.slash_menu_lines();
+        // The line's overall style is applied to every span during
+        // rendering, so we assert there. The selected entry bolds the
+        // whole row; the unselected rows stay plain.
+        let selected = &lines[0];
+        assert!(
+            selected.style.add_modifier.contains(Modifier::BOLD),
+            "selected entry should be bold: {selected:?}"
+        );
+        for line in &lines[1..] {
+            assert!(
+                !line.style.add_modifier.contains(Modifier::BOLD),
+                "unselected entry should not be bold: {line:?}"
+            );
+        }
     }
 }
