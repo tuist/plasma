@@ -494,20 +494,32 @@ impl App {
             self.mode = AppMode::Normal;
             return;
         }
-        match OpenRouterInferenceProvider::from_saved_key() {
-            Ok(Some(provider)) => {
-                self.session = Some(Session::new(provider));
-                self.mode = AppMode::Normal;
-                self.document.push(Line::from(Span::styled(
-                    "OpenRouter connected.",
-                    SUCCESS,
-                )));
-            }
+        // Reload the provider and confirm the key actually works before
+        // telling the user we connected. OpenRouter has been known to
+        // return a key that subsequent chat calls reject with 401, so
+        // we want a clear error here rather than silent failure later.
+        let provider = match OpenRouterInferenceProvider::from_saved_key() {
+            Ok(Some(provider)) => provider,
             _ => {
                 self.push_info("Saved the key, but could not load the provider.");
                 self.mode = AppMode::Normal;
+                return;
             }
+        };
+        if let Err(error) = provider.validate() {
+            // Drop the bad key so the next /connect starts fresh.
+            let _ = plasma_openrouter::delete_key();
+            self.push_info(error);
+            self.push_info("Run /connect to try again.");
+            self.mode = AppMode::Normal;
+            return;
         }
+        self.session = Some(Session::new(provider));
+        self.mode = AppMode::Normal;
+        self.document.push(Line::from(Span::styled(
+            "OpenRouter connected.",
+            SUCCESS,
+        )));
     }
 
     /// Run the OpenRouter OAuth flow: open the authorize URL in the host

@@ -10,6 +10,7 @@
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
+use plasma_openrouter::shared_agent;
 
 use crate::oauth::{bind_loopback, generate_pkce, CallbackResult};
 
@@ -52,7 +53,8 @@ fn exchange_code(code: &str, verifier: &str) -> Result<String> {
         "code_verifier": verifier,
         "code_challenge_method": "S256",
     });
-    let mut response = ureq::post(TOKEN_URL)
+    let mut response = shared_agent()
+        .post(TOKEN_URL)
         .header("accept", "application/json")
         .header("content-type", "application/json")
         .send_json(body)
