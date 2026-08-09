@@ -15,7 +15,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use base64::Engine;
 use sha2::{Digest, Sha256};
 
@@ -25,8 +25,7 @@ pub struct PkcePair {
     pub challenge: String,
 }
 
-const UNRESERVED: &[u8] =
-    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
+const UNRESERVED: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
 
 /// Generate a fresh PKCE pair. The verifier is 64 random unreserved
 /// characters; the challenge is the base64url-encoded SHA-256 of the
@@ -101,8 +100,12 @@ pub fn callback_page(state: CallbackPage) -> String {
     };
 
     let icon = match state {
-        CallbackPage::Success => r#"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>"#,
-        CallbackPage::Error => r#"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>"#,
+        CallbackPage::Success => {
+            r#"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>"#
+        }
+        CallbackPage::Error => {
+            r#"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>"#
+        }
     };
 
     let auto_close_script = if auto_close {
@@ -224,7 +227,10 @@ pub fn callback_page(state: CallbackPage) -> String {
 /// Bind a loopback server on an ephemeral port. Returns the bound port and
 /// a receiver that yields the authorization code once the user finishes
 /// the browser flow. The server is closed when the receiver is dropped.
-pub fn bind_loopback(path: &str, timeout: Duration) -> Result<(u16, mpsc::Receiver<CallbackResult>)> {
+pub fn bind_loopback(
+    path: &str,
+    timeout: Duration,
+) -> Result<(u16, mpsc::Receiver<CallbackResult>)> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let port = listener.local_addr()?.port();
     let (tx, rx) = mpsc::channel();
@@ -235,15 +241,9 @@ pub fn bind_loopback(path: &str, timeout: Duration) -> Result<(u16, mpsc::Receiv
             let (mut stream, _) = listener.accept()?;
             stream.set_read_timeout(Some(timeout)).ok();
             let mut buffer = vec![0u8; 4096];
-            let read = match stream.read(&mut buffer) {
-                Ok(n) => n,
-                Err(_) => {
-                    // Best-effort timeout; the stream may be closed or the
-                    // read may have failed. Fall through to the response
-                    // path with whatever we have.
-                    0
-                }
-            };
+            // Best-effort timeout: a closed or failed stream is treated as
+            // an empty request and follows the usual response path.
+            let read: usize = stream.read(&mut buffer).unwrap_or_default();
             let request = String::from_utf8_lossy(&buffer[..read]);
             let path = request_line_path(&request)
                 .ok_or_else(|| anyhow!("Malformed OAuth callback request"))?;
@@ -314,7 +314,7 @@ fn send_response(stream: &mut std::net::TcpStream, status: u16, body: &str) -> R
     };
     let payload = format!(
         "HTTP/1.1 {status} {reason}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.as_bytes().len()
+        body.len()
     );
     stream.write_all(payload.as_bytes())?;
     stream.flush()?;
@@ -330,10 +330,11 @@ mod tests {
         let pair = generate_pkce();
         assert_eq!(pair.verifier.len(), 64);
         assert!(pair.challenge.len() >= 43);
-        assert!(pair
-            .verifier
-            .chars()
-            .all(|c| UNRESERVED.contains(&(c as u8))));
+        assert!(
+            pair.verifier
+                .chars()
+                .all(|c| UNRESERVED.contains(&(c as u8)))
+        );
     }
 
     #[test]
@@ -348,8 +349,14 @@ mod tests {
 
     #[test]
     fn query_param_extracts_value() {
-        assert_eq!(query_param("code=abc&state=xyz", "code").as_deref(), Some("abc"));
-        assert_eq!(query_param("code=abc&state=xyz", "state").as_deref(), Some("xyz"));
+        assert_eq!(
+            query_param("code=abc&state=xyz", "code").as_deref(),
+            Some("abc")
+        );
+        assert_eq!(
+            query_param("code=abc&state=xyz", "state").as_deref(),
+            Some("xyz")
+        );
         assert_eq!(query_param("code=abc&state=xyz", "missing"), None);
     }
 
@@ -370,12 +377,11 @@ mod tests {
         // Bind a server, then "call back" with a raw HTTP request that
         // simulates the browser redirect. The receiver should yield the
         // authorization code.
-        let (port, rx) = bind_loopback("/oauth/callback", Duration::from_secs(2))
-            .expect("bind loopback");
+        let (port, rx) =
+            bind_loopback("/oauth/callback", Duration::from_secs(2)).expect("bind loopback");
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(50));
-            let mut stream =
-                std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect");
+            let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect");
             stream
                 .write_all(
                     b"GET /oauth/callback?code=the-code&state=ignored HTTP/1.1\r\nHost: localhost\r\n\r\n",
@@ -394,8 +400,14 @@ mod tests {
     fn callback_page_success_loads_noora_and_inter() {
         let html = callback_page(CallbackPage::Success);
         assert!(html.contains("Signed in"));
-        assert!(html.contains("noora.css"), "success page should link Noora's CSS");
-        assert!(html.contains("rsms.me/inter"), "success page should load Inter font");
+        assert!(
+            html.contains("noora.css"),
+            "success page should link Noora's CSS"
+        );
+        assert!(
+            html.contains("rsms.me/inter"),
+            "success page should load Inter font"
+        );
         assert!(html.contains("data-badge=\"success\""));
         // The success page should auto-close the tab; the error page should not.
         assert!(html.contains("window.close()"));
@@ -406,7 +418,10 @@ mod tests {
         let html = callback_page(CallbackPage::Error);
         assert!(html.contains("Sign-in failed"));
         assert!(html.contains("data-badge=\"error\""));
-        assert!(!html.contains("window.close()"), "error page should not auto-close");
+        assert!(
+            !html.contains("window.close()"),
+            "error page should not auto-close"
+        );
     }
 
     #[test]
@@ -436,7 +451,6 @@ mod tests {
         // quotes, box-drawing characters). The Content-Length header
         // must report the byte count or the browser will truncate the
         // page mid-tag.
-        use std::io::Write;
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let port = listener.local_addr().unwrap().port();
         let handle = thread::spawn(move || {

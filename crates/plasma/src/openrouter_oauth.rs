@@ -9,10 +9,10 @@
 
 use std::time::Duration;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use plasma_openrouter::shared_agent;
 
-use crate::oauth::{bind_loopback, generate_pkce, CallbackResult};
+use crate::oauth::{CallbackResult, bind_loopback, generate_pkce};
 
 const AUTHORIZE_URL: &str = "https://openrouter.ai/auth";
 const TOKEN_URL: &str = "https://openrouter.ai/api/v1/auth/keys";
@@ -40,9 +40,7 @@ where
     let outcome = rx
         .recv_timeout(LOGIN_TIMEOUT)
         .map_err(|_| anyhow!("Timed out waiting for the OpenRouter OAuth callback"))?;
-    let code = match outcome {
-        CallbackResult::Code(code) => code,
-    };
+    let CallbackResult::Code(code) = outcome;
 
     exchange_code(&code, &pkce.verifier)
 }
