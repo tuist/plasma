@@ -493,13 +493,15 @@ impl App {
         self.document.push(Line::from(message.into()));
     }
 
-    /// Add a user-visible error with a red left edge. Errors use a distinct
-    /// shape in the document so they do not look like agent output or status.
+    /// Add a user-visible error as a titled red message block. Keeping errors
+    /// in their own activity group makes them readable beside user and model
+    /// messages, rather than running into the preceding transcript entry.
     pub fn push_error(&mut self, message: impl Into<String>) {
-        self.document.push(Line::from(vec![
-            Span::styled("▌ ", THEME.error_marker()),
-            Span::styled(message.into(), THEME.text()),
-        ]));
+        self.begin_activity_group();
+        self.document
+            .push(message_header("Error", THEME.error_marker()));
+        self.document
+            .push(message_body(&message.into(), THEME.error_marker()));
     }
 
     /// Handle a text submission (Enter pressed without a menu active). The
@@ -1059,19 +1061,39 @@ mod tests {
         app.input = "hello world".into();
         app.submit();
         assert!(app.is_normal());
-        let error = app.document.last().expect("connection error was pushed");
-        assert!(error.to_string().starts_with("▌ "));
-        assert!(error.to_string().contains("/connect"));
-        assert_eq!(error.spans[0].style.fg, Some(ratatui::style::Color::Red));
+        let error_header = app
+            .document
+            .get(app.document.len() - 2)
+            .expect("error header was pushed");
+        let error_body = app.document.last().expect("connection error was pushed");
+        assert_eq!(error_header.to_string(), "▌ Error");
+        assert!(error_body.to_string().starts_with("▌ "));
+        assert!(error_body.to_string().contains("/connect"));
+        assert_eq!(
+            error_header.spans[0].style.fg,
+            Some(ratatui::style::Color::Red)
+        );
     }
 
     #[test]
-    fn push_error_uses_a_red_left_edge() {
+    fn push_error_uses_a_titled_red_message_block() {
         let mut app = test_app();
         app.push_error("Something went wrong.");
-        let error = app.document.last().expect("error was pushed");
-        assert_eq!(error.to_string(), "▌ Something went wrong.");
-        assert_eq!(error.spans[0].style.fg, Some(ratatui::style::Color::Red));
+        assert_eq!(app.document.len(), 2);
+        let header = &app.document[0];
+        let body = &app.document[1];
+        assert_eq!(header.to_string(), "▌ Error");
+        assert_eq!(body.to_string(), "▌ Something went wrong.");
+        assert_eq!(header.spans[0].style.fg, Some(ratatui::style::Color::Red));
+    }
+
+    #[test]
+    fn push_error_separates_itself_from_the_preceding_entry() {
+        let mut app = test_app();
+        app.push_info("Type /connect to connect your account.");
+        app.push_error("You are not connected.");
+        assert_eq!(app.document[1].to_string(), "");
+        assert_eq!(app.document[2].to_string(), "▌ Error");
     }
 
     #[test]
