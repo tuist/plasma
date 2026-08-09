@@ -1,0 +1,29 @@
+[workspace]
+members = [
+  "crates/plasma",
+  "crates/plasma-inference",
+  "crates/plasma-openrouter",
+  "crates/plasma-protocol",
+  "crates/plasma-session",
+  "crates/plasma-tools",
+]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+anyhow = "1.0"
+base64 = "0.22"
+clap = { version = "4.5", features = ["derive"] }
+crossterm = "0.28"
+directories = "5.0"
+fuzzy-matcher = "0.3"
+open = "5"
+ratatui = "0.29"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+thiserror = "2.0"
+ureq = { version = "3.0", features = ["json"] }
