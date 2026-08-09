@@ -1,14 +1,29 @@
 # Plasma
 
-An early Rust foundation for a coding agent, with a terminal user interface and an OpenRouter inference provider.
+🪐 A coding agent for your terminal.
 
-## Run
+## Get started
+
+Plasma needs Rust 1.91 or later.
 
 ```sh
-mise exec rust@1.91 -- cargo run -p plasma -- connect openrouter --api-key "$OPENROUTER_API_KEY"
-mise exec rust@1.91 -- cargo run -p plasma
+cargo run -p plasma
 ```
 
-Type `/` in the terminal interface to see available commands. Enter `/connect` to add an OpenRouter API key, then type a prompt to send it to the selected model.
+Type `/connect` and follow the sign-in flow. Once connected, type a request and press Enter.
 
-The stored key uses the operating-system appropriate configuration directory and is restricted to the current user on Unix-like systems.
+Use `/` to browse the available commands.
+
+## Connect from a script
+
+If you already have an OpenRouter key, you can connect without opening the terminal interface:
+
+```sh
+cargo run -p plasma -- connect openrouter --api-key "$OPENROUTER_API_KEY"
+```
+
+Your key is stored in your operating system's configuration directory and is readable only by your user account on Unix-like systems.
+
+## License
+
+Plasma is available under the [MIT License](LICENSE.md).
