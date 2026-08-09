@@ -90,8 +90,13 @@ fn build_layout(area: Rect, app: &App) -> (Rect, Vec<(Slot, Rect)>) {
         constraints.push(Constraint::Length(SLASH_MENU_HEIGHT));
         slots.push(Slot::SlashMenu);
     }
-    constraints.push(Constraint::Length(PROMPT_BORDER_HEIGHT));
-    slots.push(Slot::Prompt);
+    // Guided menus (connect method, provider) suppress the prompt because
+    // the menu itself is the input surface. The API-key mode keeps the
+    // prompt so the user can type the key, and so does `Normal`.
+    if !in_menu {
+        constraints.push(Constraint::Length(PROMPT_BORDER_HEIGHT));
+        slots.push(Slot::Prompt);
+    }
     constraints.push(Constraint::Length(FOOTER_HEIGHT));
     slots.push(Slot::Footer);
     let chunks = Layout::vertical(constraints).split(area);
@@ -100,6 +105,11 @@ fn build_layout(area: Rect, app: &App) -> (Rect, Vec<(Slot, Rect)>) {
         .zip(chunks.iter().copied())
         .collect();
     (area, pairs)
+}
+
+pub(crate) fn slots_for(app: &App, area: Rect) -> Vec<Slot> {
+    let (_, pairs) = build_layout(area, app);
+    pairs.into_iter().map(|(slot, _)| slot).collect()
 }
 
 fn draw(frame: &mut Frame, app: &App) {
@@ -163,5 +173,77 @@ fn draw(frame: &mut Frame, app: &App) {
     {
         let lines = app.footer.lines(footer_area.width);
         frame.render_widget(Paragraph::new(lines), *footer_area);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::App;
+
+    fn has_slot(slots: &[Slot], target: Slot) -> bool {
+        slots.iter().any(|slot| std::mem::discriminant(slot) == std::mem::discriminant(&target))
+    }
+
+    #[test]
+    fn layout_in_normal_mode_has_document_prompt_and_footer() {
+        let app = App::empty();
+        let area = Rect::new(0, 0, 80, 24);
+        let slots = slots_for(&app, area);
+        assert!(has_slot(&slots, Slot::Document));
+        assert!(has_slot(&slots, Slot::Prompt));
+        assert!(has_slot(&slots, Slot::Footer));
+        assert!(!has_slot(&slots, Slot::ConnectMenu));
+    }
+
+    #[test]
+    fn layout_in_menu_mode_omits_the_prompt() {
+        let mut app = App::empty();
+        app.mode = crate::app::AppMode::AwaitingConnectMethod { selected: 0 };
+        let area = Rect::new(0, 0, 80, 24);
+        let slots = slots_for(&app, area);
+        assert!(has_slot(&slots, Slot::Document));
+        assert!(has_slot(&slots, Slot::ConnectMenu));
+        assert!(has_slot(&slots, Slot::Footer));
+        assert!(!has_slot(&slots, Slot::Prompt), "guided menu should hide the prompt");
+    }
+
+    #[test]
+    fn layout_in_provider_menu_also_omits_the_prompt() {
+        let mut app = App::empty();
+        app.mode = crate::app::AppMode::AwaitingProvider { selected: 0 };
+        let area = Rect::new(0, 0, 80, 24);
+        let slots = slots_for(&app, area);
+        assert!(!has_slot(&slots, Slot::Prompt), "provider menu should hide the prompt");
+    }
+
+    #[test]
+    fn layout_in_api_key_mode_keeps_the_prompt() {
+        let mut app = App::empty();
+        app.mode = crate::app::AppMode::AwaitingApiKey {
+            provider: "openrouter".into(),
+            opened_browser: false,
+        };
+        let area = Rect::new(0, 0, 80, 24);
+        let slots = slots_for(&app, area);
+        assert!(has_slot(&slots, Slot::Prompt), "API key mode needs the prompt");
+    }
+
+    #[test]
+    fn layout_with_slash_menu_has_a_bar_above_the_prompt() {
+        let mut app = App::empty();
+        app.input = "/".into();
+        app.recompute_show_commands();
+        let area = Rect::new(0, 0, 80, 24);
+        let slots = slots_for(&app, area);
+        let slash_index = slots
+            .iter()
+            .position(|slot| matches!(slot, Slot::SlashMenu))
+            .expect("slash menu should be present");
+        let prompt_index = slots
+            .iter()
+            .position(|slot| matches!(slot, Slot::Prompt))
+            .expect("prompt should be present");
+        assert!(slash_index < prompt_index, "slash menu must sit above the prompt");
     }
 }
