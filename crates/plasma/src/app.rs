@@ -1,11 +1,11 @@
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{mpsc, Arc, Mutex};
 
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
-use plasma_inference::ToolDefinition;
+use plasma_inference::{InferenceError, ToolDefinition};
 use plasma_openrouter::{OpenRouterInferenceProvider, save_key};
-use plasma_session::{AgentEvent, Session, ToolDispatcher};
+use plasma_session::{AgentEvent, Message, Session, ToolDispatcher};
 use plasma_tools::{BashTool, ReadTool, Tool, workspace_files};
 use ratatui::{
     style::{Modifier, Style},
@@ -16,9 +16,9 @@ use serde_json::Value;
 use crate::browser::{BrowserOpener, SystemBrowser};
 use crate::footer::Footer;
 use crate::openrouter_oauth as oauth_flow;
-use crate::rich_text::{RichSpan, RichText};
+use crate::rich_text::RichText;
 use crate::theme::{
-    AGENT_TEXT, MENU_HINT, SELECTED, SLASH_COMMAND, SUCCESS, TITLE, TOOL_BODY,
+    AGENT_TEXT, MENU_HINT, SELECTED, SLASH_COMMAND, SUCCESS, THINKING, TITLE, TOOL_BODY,
     TOOL_ERROR, TOOL_NAME, TOOL_RESULT,
 };
 
@@ -70,7 +70,10 @@ pub enum AppMode {
 }
 
 pub struct App {
-    pub session: Option<Session<OpenRouterInferenceProvider>>,
+    /// Active session, shared with the agent worker thread. Wrapped in
+    /// `Arc<Mutex<>>` so the worker can borrow it for the duration of
+    /// a request without blocking the TUI.
+    pub session: Option<Arc<Mutex<Session<OpenRouterInferenceProvider>>>>,
     pub input: String,
     pub document: Vec<Line<'static>>,
     pub mode: AppMode,
@@ -79,10 +82,17 @@ pub struct App {
     /// meaningful while `show_commands` is true.
     pub slash_selected: Option<usize>,
     pub should_exit: bool,
+    /// True while an agent request is in flight. Used to ignore
+    /// additional Enter presses and to dim the prompt.
+    pub pending: bool,
     pub footer: Footer,
     browser: Box<dyn BrowserOpener>,
     tool_definitions: Arc<Vec<ToolDefinition>>,
-    dispatcher: AppToolDispatcher,
+    /// Cloned cheaply into the worker thread on every request.
+    dispatcher: Arc<AppToolDispatcher>,
+    /// Receiver for events from the agent worker thread. `None` when
+    /// no request is in flight.
+    event_rx: Option<mpsc::Receiver<AgentMessage>>,
 }
 
 impl App {
@@ -91,10 +101,12 @@ impl App {
     pub fn new() -> Self {
         let working_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let mut app = Self::empty();
-        app.session = OpenRouterInferenceProvider::from_saved_key()
+        if let Some(provider) = OpenRouterInferenceProvider::from_saved_key()
             .ok()
             .flatten()
-            .map(Session::new);
+        {
+            app.session = Some(Arc::new(Mutex::new(Session::new(provider))));
+        }
         app.document = vec![
             Line::from(Span::styled("Plasma", TITLE)),
             Line::from("A coding agent"),
@@ -125,10 +137,39 @@ impl App {
             show_commands: false,
             slash_selected: None,
             should_exit: false,
+            pending: false,
             footer: Footer::new(PathBuf::from(".")),
             browser: Box::new(SystemBrowser),
             tool_definitions,
-            dispatcher,
+            dispatcher: Arc::new(dispatcher),
+            event_rx: None,
+        }
+    }
+
+    /// Install a pre-populated event receiver and mark the app as
+    /// pending. Test-only hook that lets us exercise `poll_agent`
+    /// without spinning up a real worker thread.
+    #[cfg(test)]
+    pub fn install_event_receiver(&mut self, rx: mpsc::Receiver<AgentMessage>) {
+        self.event_rx = Some(rx);
+        self.pending = true;
+    }
+
+    /// Push a synthetic `AgentMessage` to the app's document via the
+    /// same path the worker would. Test-only convenience so we can
+    /// assert on the rendered output without standing up a real
+    /// worker thread.
+    #[cfg(test)]
+    pub fn push_agent_message(&mut self, message: AgentMessage) {
+        match message {
+            AgentMessage::Event(event) => self.handle_agent_event(event),
+            AgentMessage::Done(result) => {
+                self.pending = false;
+                self.event_rx = None;
+                if let Err(error) = result {
+                    self.push_info(format!("Request failed: {error}"));
+                }
+            }
         }
     }
 
@@ -140,6 +181,13 @@ impl App {
     }
 
     pub fn prompt_prefix(&self) -> &'static str {
+        if self.pending {
+            // While the worker is in flight we show a different
+            // prefix so the user knows their Enter was received and
+            // something is happening, even before the first event
+            // streams in.
+            return "… ";
+        }
         match self.mode {
             AppMode::Normal => "> ",
             AppMode::AwaitingApiKey { .. } => "OpenRouter API key: ",
@@ -432,6 +480,11 @@ impl App {
                 self.push_info(format!("Unknown command: {unknown}"));
             }
             prompt => {
+                if self.pending {
+                    // A request is in flight; ignore additional submits
+                    // so the conversation thread stays coherent.
+                    return;
+                }
                 if self.session.is_none() {
                     self.enter_connect_method();
                 } else {
@@ -514,7 +567,7 @@ impl App {
             self.mode = AppMode::Normal;
             return;
         }
-        self.session = Some(Session::new(provider));
+        self.session = Some(Arc::new(Mutex::new(Session::new(provider))));
         self.mode = AppMode::Normal;
         self.document.push(Line::from(Span::styled(
             "OpenRouter connected.",
@@ -558,28 +611,81 @@ impl App {
         }
     }
 
+    /// Hand the prompt off to a worker thread and stream events back
+    /// through a channel. The TUI stays responsive while the request
+    /// is in flight; `poll_agent` is called once per frame to apply
+    /// whatever the worker has produced so far.
     fn send_prompt(&mut self, prompt: &str) {
-        let Some(session) = self.session.as_mut() else {
+        if self.pending {
+            // A request is already running. Ignore the new prompt so we
+            // don't lose the current conversation thread.
+            return;
+        }
+        let Some(session) = self.session.as_ref().cloned() else {
             unreachable!("send_prompt is only called when a session exists")
         };
         let definitions = Arc::clone(&self.tool_definitions);
-        let dispatcher = &self.dispatcher as &dyn ToolDispatcher;
-        // The session borrow cannot overlap with `self` inside the
-        // event callback, so collect events into a `Vec` while the
-        // session is still borrowed and replay them once it is released.
-        let mut events: Vec<AgentEvent> = Vec::new();
-        let result = session.submit_with_tools(
-            prompt,
-            definitions,
-            dispatcher,
-            &mut |event| events.push(event),
-        );
-        for event in events {
-            self.handle_agent_event(event);
+        let dispatcher = Arc::clone(&self.dispatcher);
+        let prompt = prompt.to_string();
+        let (tx, rx) = mpsc::channel();
+        self.event_rx = Some(rx);
+        self.pending = true;
+        // Surface the in-flight state immediately so the user sees
+        // something happen, even before the worker has anything to
+        // report. The line stays in the document and is followed by
+        // the streamed events.
+        self.push_thinking();
+        std::thread::spawn(move || {
+            let mut session = session.lock().expect("session mutex poisoned");
+            let result = session.submit_with_tools(
+                prompt,
+                definitions,
+                dispatcher.as_ref(),
+                &mut |event| {
+                    let _ = tx.send(AgentMessage::Event(event));
+                },
+            );
+            let _ = tx.send(AgentMessage::Done(result));
+        });
+    }
+
+    /// Drain any pending events from the agent worker thread. Called
+    /// once per frame so the TUI shows streamed output as it arrives.
+    /// Returns true while a request is still in flight (so the caller
+    /// can keep the prompt dimmed and ignore extra Enter presses).
+    pub fn poll_agent(&mut self) -> bool {
+        // Collect every message currently buffered, then drop the
+        // receiver borrow before mutating `self`. The receiver only
+        // borrows immutably and the messages are owned, so we can
+        // move them out of the closure.
+        let messages: Vec<AgentMessage> = match self.event_rx.as_ref() {
+            Some(rx) => std::iter::from_fn(|| rx.try_recv().ok()).collect(),
+            None => return false,
+        };
+        if messages.is_empty() {
+            return self.pending;
         }
-        if let Err(error) = result {
-            self.push_info(format!("Request failed: {error}"));
+        for message in messages {
+            match message {
+                AgentMessage::Event(event) => self.handle_agent_event(event),
+                AgentMessage::Done(result) => {
+                    self.pending = false;
+                    self.event_rx = None;
+                    if let Err(error) = result {
+                        self.push_info(format!("Request failed: {error}"));
+                    }
+                    return false;
+                }
+            }
         }
+        self.pending
+    }
+
+    fn push_thinking(&mut self) {
+        self.document.push(Line::from(Span::styled(
+            "Thinking\u{2026}",
+            THINKING,
+        )));
     }
 
     fn handle_agent_event(&mut self, event: AgentEvent) {
@@ -610,6 +716,15 @@ impl Default for App {
     fn default() -> Self {
         Self::empty()
     }
+}
+
+/// One message from the agent worker thread. Either an incremental
+/// event (text/tool call/tool result) or the final outcome of the
+/// request.
+#[derive(Debug)]
+enum AgentMessage {
+    Event(AgentEvent),
+    Done(Result<Message, InferenceError>),
 }
 
 /// Routes `ToolCall`s (name + JSON arguments) to the matching `Tool`
@@ -964,6 +1079,22 @@ mod tests {
     }
 
     #[test]
+    fn prompt_prefix_shows_thinking_marker_while_pending() {
+        let mut app = test_app();
+        assert_eq!(app.prompt_prefix(), "> ");
+        app.pending = true;
+        // The pending flag wins over the mode so the user always sees
+        // the spinner, even mid-typing or inside the API key prompt.
+        assert!(app.prompt_prefix().contains('\u{2026}'), "got {:?}", app.prompt_prefix());
+        app.pending = false;
+        app.mode = AppMode::AwaitingApiKey {
+            provider: "openrouter".into(),
+            opened_browser: false,
+        };
+        assert_eq!(app.prompt_prefix(), "OpenRouter API key: ");
+    }
+
+    #[test]
     fn slash_menu_lines_align_the_description_column() {
         let mut app = test_app();
         app.input = "/".into();
@@ -1020,5 +1151,120 @@ mod tests {
                 "unselected entry should not be bold: {line:?}"
             );
         }
+    }
+
+    // -- Async agent event loop -------------------------------------------
+
+    fn build_test_session() -> Arc<Mutex<Session<OpenRouterInferenceProvider>>> {
+        // The real OpenRouter key is not read here; we only need a
+        // session handle for tests that exercise the event channel.
+        Arc::new(Mutex::new(Session::new(OpenRouterInferenceProvider::new(
+            "sk-or-v1-test",
+        ))))
+    }
+
+    #[test]
+    fn submit_prompt_sets_pending_and_pushes_thinking() {
+        let mut app = test_app();
+        app.session = Some(build_test_session());
+        let docs_before = app.document.len();
+        app.input = "hello".into();
+        app.submit();
+        assert!(app.pending, "submit should mark the app as pending");
+        assert_eq!(
+            app.document.len(),
+            docs_before + 2,
+            "submit should push the echo + a Thinking\u{2026} line, got {:?}",
+            app
+                .document
+                .iter()
+                .map(Line::to_string)
+                .collect::<Vec<_>>()
+        );
+        let last = app.document.last().expect("Thinking line was pushed");
+        let rendered = last.to_string();
+        assert!(
+            rendered.contains("Thinking"),
+            "last line should be the Thinking\u{2026} indicator, got {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn submit_normal_ignores_extra_prompts_while_pending() {
+        let mut app = test_app();
+        app.session = Some(build_test_session());
+        app.input = "first".into();
+        app.submit();
+        assert!(app.pending);
+        let docs_after_first = app.document.len();
+        let input_before = app.input.clone();
+        app.input = "second".into();
+        app.submit();
+        // The second submit clears the input (so the user can start
+        // typing their next message) but the catch-all in
+        // `submit_normal` short-circuits, so no second echo or
+        // Thinking\u{2026} line lands in the document.
+        assert_eq!(app.input, "", "input should be cleared on submit");
+        assert_eq!(
+            app.document.len(),
+            docs_after_first,
+            "second submit while pending should not push any lines (had {input_before:?})"
+        );
+    }
+
+    #[test]
+    fn poll_agent_returns_false_when_nothing_is_in_flight() {
+        let mut app = test_app();
+        assert!(!app.poll_agent());
+    }
+
+    #[test]
+    fn poll_agent_drains_events_and_clears_pending_on_done() {
+        let mut app = test_app();
+        let (tx, rx) = mpsc::channel();
+        app.install_event_receiver(rx);
+        tx.send(AgentMessage::Event(AgentEvent::Text(
+            "hello there".into(),
+        )))
+        .unwrap();
+        tx.send(AgentMessage::Done(Ok(Message::assistant(
+            "world",
+        ))))
+        .unwrap();
+        let in_flight = app.poll_agent();
+        assert!(!in_flight, "Done should clear pending");
+        assert!(!app.pending);
+        let texts: Vec<String> = app
+            .document
+            .iter()
+            .map(Line::to_string)
+            .filter(|line| !line.trim().is_empty())
+            .collect();
+        assert!(
+            texts.iter().any(|line| line == "hello there"),
+            "text event should land in the document, got {texts:?}"
+        );
+    }
+
+    #[test]
+    fn poll_agent_reports_request_failure() {
+        let mut app = test_app();
+        let (tx, rx) = mpsc::channel();
+        app.install_event_receiver(rx);
+        tx.send(AgentMessage::Done(Err(InferenceError::Request(
+            "boom".into(),
+        ))))
+        .unwrap();
+        let in_flight = app.poll_agent();
+        assert!(!in_flight);
+        let last = app
+            .document
+            .last()
+            .expect("a failure message was pushed")
+            .to_string();
+        assert!(
+            last.contains("Request failed") && last.contains("boom"),
+            "expected a Request failed line, got {last:?}"
+        );
     }
 }

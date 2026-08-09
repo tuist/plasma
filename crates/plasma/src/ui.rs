@@ -44,6 +44,10 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()>
     while !app.should_exit {
         let frame_start = std::time::Instant::now();
 
+        // Pull any agent events the worker thread has produced since
+        // the last frame so the document shows streamed output.
+        app.poll_agent();
+
         terminal.draw(|frame| draw(frame, &app))?;
 
         // Drain any queued events without blocking so the loop keeps redrawing.
@@ -152,16 +156,31 @@ fn draw(frame: &mut Frame, app: &App) {
             .border_style(PROMPT_BORDER);
         let inner = prompt_block.inner(*prompt_area);
         let prompt_prefix = app.prompt_prefix();
-        let styled_prompt = Line::from(vec![
-            Span::styled(prompt_prefix.to_string(), PROMPT_PREFIX),
-            Span::raw(app.input.clone()),
-        ]);
+        // While a request is in flight we render the "Thinking…"
+        // message instead of the user's input — they already submitted
+        // it, and showing the same text again would imply we hadn't
+        // received it.
+        let body: Line = if app.pending {
+            Line::from(Span::styled(
+                "Thinking\u{2026}",
+                crate::theme::THINKING,
+            ))
+        } else {
+            Line::from(vec![
+                Span::styled(prompt_prefix.to_string(), PROMPT_PREFIX),
+                Span::raw(app.input.clone()),
+            ])
+        };
         frame.render_widget(prompt_block, *prompt_area);
-        frame.render_widget(Paragraph::new(styled_prompt), inner);
+        frame.render_widget(Paragraph::new(body), inner);
 
-        let cursor_x =
+        let cursor_x = if app.pending {
+            // Hide the cursor while we wait for the worker.
+            inner.x.saturating_sub(1)
+        } else {
             (inner.x + prompt_prefix.len() as u16 + app.input.len() as u16)
-                .min(inner.right().saturating_sub(1));
+                .min(inner.right().saturating_sub(1))
+        };
         let cursor_y = inner.y;
         frame.set_cursor_position((cursor_x, cursor_y));
     }

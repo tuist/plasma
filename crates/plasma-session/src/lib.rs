@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use plasma_inference::{InferenceError, InferenceProvider, ToolDefinition};
-use plasma_protocol::Message;
+pub use plasma_protocol::Message;
 
 /// What the agent did on the way to its final answer. The host uses
 /// these events to render tool calls and results next to the model's

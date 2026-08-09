@@ -31,6 +31,11 @@ pub const TOOL_BODY: Style = Style::new()
 pub const AGENT_TEXT: Style = Style::new()
     .fg(Color::Gray)
     .add_modifier(Modifier::ITALIC);
+/// "Thinking…" indicator while an agent request is in flight. Dim and
+/// italic so it reads as transient state, not as a model response.
+pub const THINKING: Style = Style::new()
+    .fg(Color::DarkGray)
+    .add_modifier(Modifier::ITALIC);
 /// Tool result body — slightly dimmer than agent text so the result
 /// reads as data the model consumed rather than a new thought.
 pub const TOOL_RESULT: Style = Style::new().fg(Color::DarkGray);
