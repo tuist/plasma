@@ -68,9 +68,10 @@ impl RichSpan {
     pub fn style(&self) -> Style {
         match self.kind {
             SpanKind::Text => Style::default(),
-            SpanKind::Command => Style::new()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
+            // Plain cyan so the command reads as a verb in the menu
+            // without the bold modifier pushing the selected entry into
+            // the terminal's "bright" palette (which renders as white).
+            SpanKind::Command => Style::new().fg(Color::Cyan),
             SpanKind::Path => Style::new().fg(Color::Yellow),
             SpanKind::Code => Style::new().fg(Color::Green),
             SpanKind::Strong => Style::new().add_modifier(Modifier::BOLD),
@@ -146,7 +147,10 @@ mod tests {
         assert_eq!(rich.spans.len(), 3);
         assert_eq!(rich.spans[1].content.as_ref(), "/connect");
         assert_eq!(rich.spans[1].style.fg, Some(Color::Cyan));
-        assert!(rich.spans[1].style.add_modifier.contains(Modifier::BOLD));
+        // The command style is plain cyan so the selected slash-menu
+        // entry does not flash white through the terminal's bright
+        // palette.
+        assert!(!rich.spans[1].style.add_modifier.contains(Modifier::BOLD));
     }
 
     #[test]
