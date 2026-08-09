@@ -174,11 +174,13 @@ impl App {
             .map(|(index, command)| {
                 let is_selected = self.slash_selected == Some(index);
                 let prefix = if is_selected { "→ " } else { "  " };
+                // Pad the command name so the description column lines up
+                // regardless of which entry is selected.
+                let padded_name = format!("{:<10}", command.name);
                 let mut line = RichText::new()
                     .push_str(prefix)
                     .push_str("/")
-                    .push_command(command.name)
-                    .push_str(&format!(" {:<8}", ""))
+                    .push_command(padded_name)
                     .push_str(command.description);
                 if is_selected {
                     line = line.push_strong("");
@@ -944,5 +946,42 @@ mod tests {
         assert_eq!(app.prompt_prefix(), "OpenRouter API key: ");
         app.mode = AppMode::AwaitingConnectMethod { selected: 0 };
         assert_eq!(app.prompt_prefix(), "");
+    }
+
+    #[test]
+    fn slash_menu_lines_align_the_description_column() {
+        let mut app = test_app();
+        app.input = "/".into();
+        app.recompute_show_commands();
+        let lines = app.slash_menu_lines();
+        // The description starts at the same column for every entry: the
+        // 2-char prefix ("→ " or "  "), then '/', then the 10-char padded
+        // command name. That makes the description column index 13.
+        const DESCRIPTION_COLUMN: usize = 13;
+        for line in &lines {
+            let s = line.to_string();
+            let chars: Vec<char> = s.chars().collect();
+            assert!(
+                chars.len() > DESCRIPTION_COLUMN,
+                "line is too short to contain a description: {s:?}"
+            );
+            assert!(
+                chars[DESCRIPTION_COLUMN] != ' ',
+                "description should start at column {DESCRIPTION_COLUMN}, got {s:?}"
+            );
+        }
+        // Every line should share the same description column.
+        let columns: Vec<usize> = lines
+            .iter()
+            .map(|line| {
+                let s = line.to_string();
+                s.chars().nth(DESCRIPTION_COLUMN).map(|c| c.len_utf8()).unwrap_or(0)
+            })
+            .collect();
+        let first = columns[0];
+        assert!(
+            columns.iter().all(|c| *c == first),
+            "description columns should all match, got {columns:?}"
+        );
     }
 }
