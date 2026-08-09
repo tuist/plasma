@@ -150,7 +150,7 @@ impl App {
     /// pending. Test-only hook that lets us exercise `poll_agent`
     /// without spinning up a real worker thread.
     #[cfg(test)]
-    pub fn install_event_receiver(&mut self, rx: mpsc::Receiver<AgentMessage>) {
+    pub(crate) fn install_event_receiver(&mut self, rx: mpsc::Receiver<AgentMessage>) {
         self.event_rx = Some(rx);
         self.pending = true;
     }
@@ -160,7 +160,7 @@ impl App {
     /// assert on the rendered output without standing up a real
     /// worker thread.
     #[cfg(test)]
-    pub fn push_agent_message(&mut self, message: AgentMessage) {
+    pub(crate) fn push_agent_message(&mut self, message: AgentMessage) {
         match message {
             AgentMessage::Event(event) => self.handle_agent_event(event),
             AgentMessage::Done(result) => {
@@ -720,9 +720,11 @@ impl Default for App {
 
 /// One message from the agent worker thread. Either an incremental
 /// event (text/tool call/tool result) or the final outcome of the
-/// request.
+/// request. `pub(crate)` so the test-only hook on `App` that installs
+/// a fake receiver can name the type without exposing it to the
+/// rest of the crate as a public API.
 #[derive(Debug)]
-enum AgentMessage {
+pub(crate) enum AgentMessage {
     Event(AgentEvent),
     Done(Result<Message, InferenceError>),
 }

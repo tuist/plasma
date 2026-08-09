@@ -267,6 +267,12 @@ fn map_ureq_error(error: ureq::Error) -> InferenceError {
     }
 }
 
+// Indirection so tests can redirect the auth-key URL to a mock server
+// without exposing a public setter. `validate` looks at this first,
+// then falls back to the real OpenRouter endpoint.
+static AUTH_KEY_URL_OVERRIDE: std::sync::Mutex<Option<String>> =
+    std::sync::Mutex::new(None);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -420,5 +426,3 @@ mod tests {
 // Indirection so tests can redirect the auth-key URL to a mock server
 // without exposing a public setter. `validate` looks at this first,
 // then falls back to the real OpenRouter endpoint.
-static AUTH_KEY_URL_OVERRIDE: std::sync::Mutex<Option<String>> =
-    std::sync::Mutex::new(None);
