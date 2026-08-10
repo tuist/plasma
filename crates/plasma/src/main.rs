@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
 
+mod acp;
 mod agent_prompt;
 mod app;
 mod browser;

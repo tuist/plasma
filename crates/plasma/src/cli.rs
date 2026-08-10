@@ -38,6 +38,8 @@ pub enum Command {
         #[arg(long, value_enum, default_value_t = ColorChoice::Auto)]
         color: ColorChoice,
     },
+    /// Run as a headless Agent Client Protocol server over standard input/output.
+    Acp,
     Connect {
         provider: String,
         #[arg(long)]
@@ -47,6 +49,10 @@ pub enum Command {
 
 pub fn run(cli: Cli) -> Result<()> {
     match cli.command {
+        Some(Command::Acp) => {
+            tokio::runtime::Runtime::new()?.block_on(crate::acp::run())?;
+            Ok(())
+        }
         Some(Command::ImportPiCredentials) => {
             if import_pi_openrouter_credential()? {
                 println!("Imported OpenRouter credential from Pi.");

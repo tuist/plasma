@@ -32,6 +32,16 @@ plasma exec "Run the test suite and summarize any failures"
 
 Credentials follow the [XDG Base Directory Specification](https://specifications.freedesktop.org/basedir-spec/latest/), defaulting to `$XDG_CONFIG_HOME/plasma` or `~/.config/plasma`. Set `PLASMA_CREDENTIAL_DIR` to give a harness an isolated, lock-protected directory. The importer reads Pi's usual `~/.pi/agent/auth.json` source; set `PLASMA_PI_AUTH_FILE` to use another source file.
 
+## Headless editor integration
+
+Plasma can also run as a headless [Agent Client Protocol](https://agentclientprotocol.com/) backend for a compatible editor:
+
+```sh
+plasma acp
+```
+
+The editor starts this command and communicates over standard input/output. Authenticate first with `plasma connect openrouter --api-key <key>`; the ACP session uses the editor-provided workspace as the root for its `read` and `bash` tools.
+
 ## License
 
 Plasma is available under the [MIT License](LICENSE.md).
