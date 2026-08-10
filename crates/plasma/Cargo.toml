@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+agent-client-protocol = "2.0"
 base64.workspace = true
 clap.workspace = true
 crossterm.workspace = true
@@ -18,4 +19,5 @@ plasma-tools = { path = "../plasma-tools" }
 ratatui.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+tokio.workspace = true
 ureq = { workspace = true, features = ["json"] }

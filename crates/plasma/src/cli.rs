@@ -12,6 +12,8 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Run as a headless Agent Client Protocol server over standard input/output.
+    Acp,
     Connect {
         provider: String,
         #[arg(long)]
@@ -20,6 +22,10 @@ pub enum Command {
 }
 
 pub fn run(cli: Cli) -> Result<()> {
+    if matches!(cli.command, Some(Command::Acp)) {
+        tokio::runtime::Runtime::new()?.block_on(crate::acp::run())?;
+        return Ok(());
+    }
     if let Some(Command::Connect { provider, api_key }) = cli.command {
         anyhow::ensure!(
             provider.eq_ignore_ascii_case("openrouter"),

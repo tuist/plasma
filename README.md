@@ -14,6 +14,16 @@ mise use -g github:tuist/plasma
 
 Run `plasma`, then type `/connect` and follow the sign-in flow. Once connected, type a request and press Enter. Use `/` to browse the available commands.
 
+## Headless editor integration
+
+Plasma can also run as a headless [Agent Client Protocol](https://agentclientprotocol.com/) backend for a compatible editor:
+
+```sh
+plasma acp
+```
+
+The editor starts this command and communicates over standard input/output. Authenticate first with `plasma connect openrouter --api-key <key>`; the ACP session uses the editor-provided workspace as the root for its `read` and `bash` tools.
+
 ## License
 
 Plasma is available under the [MIT License](LICENSE.md).
