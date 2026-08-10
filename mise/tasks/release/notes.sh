@@ -22,13 +22,7 @@ if [[ -z "${version}" ]]; then
   exit 1
 fi
 
-latest_version="$(git tag -l | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n1 || true)"
-
-if [[ -n "${latest_version}" ]]; then
-  rendered="$(git cliff --config cliff.toml --repository . --tag "${version}" -- "${latest_version}..HEAD")"
-else
-  rendered="$(git cliff --config cliff.toml --repository . --tag "${version}")"
-fi
+rendered="$(git cliff --config cliff.toml --repository . --unreleased --tag "${version}")"
 
 awk '
   !found && /<!-- RELEASE NOTES START -->/ { found = 1; next }
