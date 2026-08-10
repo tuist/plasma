@@ -10,6 +10,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use crate::agent_prompt::CODING_AGENT_PROMPT;
+
 use agent_client_protocol::schema::v1::{
     AgentCapabilities, ContentBlock, ContentChunk, Implementation, InitializeRequest,
     InitializeResponse, NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse,
@@ -126,7 +128,7 @@ impl HeadlessSession {
             .map_err(|error| format!("Could not load the OpenRouter connection: {error}"))
             .and_then(|provider| {
                 provider
-                    .map(Session::new)
+                    .map(|provider| Session::with_system_prompt(provider, CODING_AGENT_PROMPT))
                     .ok_or_else(|| "Plasma is not connected. Run `plasma connect openrouter --api-key <key>` first.".to_string())
             });
         Self {

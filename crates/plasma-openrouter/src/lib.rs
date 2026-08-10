@@ -1,11 +1,10 @@
-use std::{fs, io, path::PathBuf, sync::OnceLock, time::Duration};
+use std::{io, sync::OnceLock, time::Duration};
 
-use directories::ProjectDirs;
 use plasma_inference::{InferenceError, InferenceProvider, ToolDefinition};
 use plasma_protocol::{Message, Role, ToolCall};
 use serde_json::{Value, json};
 
-const DEFAULT_MODEL: &str = "openai/gpt-4.1-mini";
+const DEFAULT_MODEL: &str = "minimax/minimax-m3";
 /// End-to-end timeout for every OpenRouter HTTP call. The chat endpoint
 /// usually returns in a couple of seconds; 30s is generous but still
 /// bounded so a hung connection can't freeze the agent forever.
@@ -13,6 +12,10 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Endpoint used to confirm a saved key is still accepted. A 200 here
 /// means the key authenticates; a 401 means the user has to reconnect.
 const AUTH_KEY_URL: &str = "https://openrouter.ai/api/v1/auth/key";
+
+mod credentials;
+
+pub use credentials::{CredentialStore, FileCredentialStore, import_pi_openrouter_credential};
 
 /// Shared ureq agent so the connection pool and timeouts are configured
 /// in one place. The agent is created on first use and reused for the
@@ -42,7 +45,12 @@ impl OpenRouterInferenceProvider {
     }
 
     pub fn from_saved_key() -> io::Result<Option<Self>> {
-        load_key().map(|key| key.map(Self::new))
+        Self::from_credential_store(&FileCredentialStore::from_environment()?)
+    }
+
+    /// Construct a provider from a host-supplied credential store.
+    pub fn from_credential_store(store: &dyn CredentialStore) -> io::Result<Option<Self>> {
+        store.load().map(|key| key.map(Self::new))
     }
 
     /// Identifier shown in the conversation transcript for this provider.
@@ -109,7 +117,11 @@ impl InferenceProvider for OpenRouterInferenceProvider {
                 })
             })
             .collect();
-        let mut body = json!({"model": self.model, "messages": messages});
+        let mut body = json!({
+            "model": self.model,
+            "messages": messages,
+            "reasoning": { "effort": "high", "exclude": true },
+        });
         if !tools_payload.is_empty() {
             body["tools"] = Value::Array(tools_payload);
         }
@@ -200,42 +212,18 @@ fn parse_tool_call(value: &Value) -> Result<ToolCall, InferenceError> {
 }
 
 pub fn save_key(api_key: &str) -> io::Result<()> {
-    let path = key_path()?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(&path, api_key)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
-    }
-    Ok(())
+    FileCredentialStore::from_environment()?.save(api_key)
 }
 
 /// Remove the saved key. Used when validation fails so the next
 /// `/connect` starts from a clean slate instead of reusing a key that
 /// OpenRouter has already rejected.
 pub fn delete_key() -> io::Result<()> {
-    match fs::remove_file(key_path()?) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error),
-    }
+    FileCredentialStore::from_environment()?.delete()
 }
 
 pub fn load_key() -> io::Result<Option<String>> {
-    match fs::read_to_string(key_path()?) {
-        Ok(key) => Ok(Some(key)),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error),
-    }
-}
-
-fn key_path() -> io::Result<PathBuf> {
-    ProjectDirs::from("dev", "tuist", "plasma")
-        .map(|directories| directories.config_dir().join("openrouter.key"))
-        .ok_or_else(|| io::Error::other("could not resolve a configuration directory"))
+    FileCredentialStore::from_environment()?.load()
 }
 
 fn role_name(role: &Role) -> &'static str {
@@ -326,19 +314,6 @@ mod tests {
             .replace(url.to_string());
         body();
         *AUTH_KEY_URL_OVERRIDE.lock().unwrap() = previous;
-    }
-
-    #[test]
-    fn delete_key_is_a_noop_when_no_file_exists() {
-        // `delete_key` may delete the real user key on disk; we only
-        // assert the contract that a missing file is treated as success.
-        // The test passes as long as the call doesn't panic.
-        let result = delete_key();
-        match result {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => panic!("unexpected error: {error}"),
-        }
     }
 
     #[test]

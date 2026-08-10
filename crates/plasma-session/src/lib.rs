@@ -34,6 +34,14 @@ impl<P: InferenceProvider> Session<P> {
             history: Vec::new(),
         }
     }
+
+    /// Start a conversation with host-provided operating instructions.
+    pub fn with_system_prompt(provider: P, prompt: impl Into<String>) -> Self {
+        Self {
+            provider,
+            history: vec![Message::system(prompt)],
+        }
+    }
     pub fn history(&self) -> &[Message] {
         &self.history
     }
@@ -115,4 +123,30 @@ impl<P: InferenceProvider> Session<P> {
 /// host provides a dispatcher that resolves the call to a string.
 pub trait ToolDispatcher {
     fn dispatch(&self, name: &str, arguments_json: &str) -> Result<String, String>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn system_prompt_is_the_first_history_message() {
+        struct Provider;
+        impl InferenceProvider for Provider {
+            fn name(&self) -> &str {
+                "test"
+            }
+
+            fn complete(
+                &mut self,
+                _history: &[Message],
+                _tools: &[ToolDefinition],
+            ) -> Result<Message, InferenceError> {
+                Ok(Message::assistant("done"))
+            }
+        }
+
+        let session = Session::with_system_prompt(Provider, "be useful");
+        assert_eq!(session.history()[0], Message::system("be useful"));
+    }
 }

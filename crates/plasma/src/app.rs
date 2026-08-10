@@ -14,6 +14,7 @@ use ratatui::{
 };
 use serde_json::Value;
 
+use crate::agent_prompt::CODING_AGENT_PROMPT;
 use crate::browser::{BrowserOpener, SystemBrowser};
 use crate::footer::Footer;
 use crate::openrouter_oauth as oauth_flow;
@@ -139,7 +140,10 @@ impl App {
         ];
         match OpenRouterInferenceProvider::from_saved_key() {
             Ok(Some(provider)) => {
-                app.session = Some(Arc::new(Mutex::new(Session::new(provider))));
+                app.session = Some(Arc::new(Mutex::new(Session::with_system_prompt(
+                    provider,
+                    CODING_AGENT_PROMPT,
+                ))));
             }
             Ok(None) => {}
             Err(error) => app.push_error(format!(
@@ -634,7 +638,10 @@ impl App {
             self.mode = AppMode::Normal;
             return;
         }
-        self.session = Some(Arc::new(Mutex::new(Session::new(provider))));
+        self.session = Some(Arc::new(Mutex::new(Session::with_system_prompt(
+            provider,
+            CODING_AGENT_PROMPT,
+        ))));
         self.mode = AppMode::Normal;
         self.document.push(Line::from(Span::styled(
             "OpenRouter connected.",

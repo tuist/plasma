@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 directories.workspace = true
+fs2.workspace = true
 plasma-inference = { path = "../plasma-inference" }
 plasma-protocol = { path = "../plasma-protocol" }
 serde_json.workspace = true
