@@ -8,7 +8,7 @@
 use std::{
     path::{Path, PathBuf},
     process::Command,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, mpsc},
     thread,
     time::{Duration, Instant},
 };
@@ -17,6 +17,7 @@ use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
 };
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(4);
@@ -52,7 +53,12 @@ struct CiStatus {
 pub struct Footer {
     working_dir: PathBuf,
     state: Arc<Mutex<FooterState>>,
-    _refresh: thread::JoinHandle<()>,
+    refresh: Option<RefreshWorker>,
+}
+
+struct RefreshWorker {
+    stop: mpsc::Sender<()>,
+    handle: Option<thread::JoinHandle<()>>,
 }
 
 impl Footer {
@@ -62,13 +68,27 @@ impl Footer {
         let state = Arc::new(Mutex::new(FooterState::default()));
         let refresh_state = Arc::clone(&state);
         let refresh_dir = working_dir.clone();
+        let (stop, stop_receiver) = mpsc::channel();
         let refresh = thread::spawn(move || {
-            refresh_loop(refresh_dir, refresh_state);
+            refresh_loop(refresh_dir, refresh_state, stop_receiver);
         });
         Self {
             working_dir,
             state,
-            _refresh: refresh,
+            refresh: Some(RefreshWorker {
+                stop,
+                handle: Some(refresh),
+            }),
+        }
+    }
+
+    /// Build a footer snapshot without starting background work. Tests and
+    /// bare application state use this constructor.
+    pub fn inert(working_dir: PathBuf) -> Self {
+        Self {
+            working_dir,
+            state: Arc::new(Mutex::new(FooterState::default())),
+            refresh: None,
         }
     }
 
@@ -86,6 +106,18 @@ impl Footer {
             left.push_str(&ci_summary);
         }
         vec![line_with_right_spans(width, &left, model_spans(), DIM)]
+    }
+}
+
+impl Drop for Footer {
+    fn drop(&mut self) {
+        let Some(worker) = &mut self.refresh else {
+            return;
+        };
+        let _ = worker.stop.send(());
+        if let Some(handle) = worker.handle.take() {
+            let _ = handle.join();
+        }
     }
 }
 
@@ -107,12 +139,13 @@ fn line_with_right_spans(
     }
     let right_width: usize = right_spans
         .iter()
-        .map(|span| span.content.as_ref().len())
+        .map(|span| span.content.as_ref().width())
         .sum();
-    if left.len() + right_width + 1 >= available {
+    let left_width = left.width();
+    if left_width + right_width + 1 >= available {
         return Line::from(Span::styled(truncate(left, available), left_style));
     }
-    let padding = available - left.len() - right_width;
+    let padding = available - left_width - right_width;
     let mut spans = vec![Span::styled(left.to_string(), left_style)];
     spans.push(Span::raw(" ".repeat(padding)));
     spans.extend(right_spans);
@@ -120,13 +153,27 @@ fn line_with_right_spans(
 }
 
 fn truncate(input: &str, max: usize) -> String {
-    if input.len() <= max {
+    if input.width() <= max {
         return input.to_string();
     }
-    if max <= 1 {
+    if max == 0 {
+        return String::new();
+    }
+    if max == 1 {
         return "\u{2026}".to_string();
     }
-    let mut out = input[..max - 1].to_string();
+    let budget = max - 1;
+    let mut width = 0;
+    let mut end = 0;
+    for (index, character) in input.char_indices() {
+        let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
+        if width + character_width > budget {
+            break;
+        }
+        width += character_width;
+        end = index + character.len_utf8();
+    }
+    let mut out = input[..end].to_string();
     out.push('\u{2026}');
     out
 }
@@ -188,14 +235,17 @@ fn format_ci(ci: CiStatus) -> Option<String> {
 
 // -- Background refresh -------------------------------------------------------
 
-fn refresh_loop(working_dir: PathBuf, state: Arc<Mutex<FooterState>>) {
+fn refresh_loop(working_dir: PathBuf, state: Arc<Mutex<FooterState>>, stop: mpsc::Receiver<()>) {
     loop {
         // Errors are intentionally swallowed: a failing `gh` invocation
         // should not write to stderr while the TUI is drawing, and the
         // footer should simply stop showing the data that failed to
         // refresh until the next successful poll.
         refresh_once(&working_dir, &state);
-        thread::sleep(REFRESH_INTERVAL);
+        match stop.recv_timeout(REFRESH_INTERVAL) {
+            Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => return,
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
     }
 }
 
@@ -314,70 +364,4 @@ fn run_command(program: &str, args: &[&str], working_dir: &Path) -> anyhow::Resu
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn shorten_path_replaces_home_with_tilde() {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_default();
-        if home.as_os_str().is_empty() {
-            return;
-        }
-        let path = home.join("work").join("plasma");
-        let shortened = shorten_path(&path);
-        assert!(shortened.starts_with('~'), "got {shortened}");
-        assert!(shortened.ends_with("work/plasma"), "got {shortened}");
-    }
-
-    #[test]
-    fn shorten_path_keeps_last_two_components_for_long_paths() {
-        let path = PathBuf::from("/a/very/long/path/to/the/worktree");
-        let shortened = shorten_path(&path);
-        assert!(shortened.starts_with('\u{2026}'), "got {shortened}");
-        assert!(shortened.ends_with("the/worktree"), "got {shortened}");
-    }
-
-    #[test]
-    fn truncate_respects_max_length() {
-        assert_eq!(truncate("hello world", 5), "hell\u{2026}");
-        assert_eq!(truncate("hi", 5), "hi");
-    }
-
-    #[test]
-    fn format_ci_aggregates_counts() {
-        let ci = CiStatus {
-            passing: 3,
-            failing: 1,
-            pending: 2,
-        };
-        let rendered = format_ci(ci).expect("some checks present");
-        assert!(rendered.contains("3 passing"));
-        assert!(rendered.contains("1 failing"));
-        assert!(rendered.contains("2 pending"));
-    }
-
-    #[test]
-    fn format_ci_returns_none_when_no_checks() {
-        let ci = CiStatus {
-            passing: 0,
-            failing: 0,
-            pending: 0,
-        };
-        assert!(format_ci(ci).is_none());
-    }
-
-    #[test]
-    fn footer_is_one_line_and_omits_ci_when_no_checks() {
-        let footer = Footer::new(PathBuf::from("."));
-        // No pull request or checks should introduce a second status row.
-        let lines = footer.lines(120);
-        assert_eq!(lines.len(), 1);
-        let footer_line = lines[0].to_string();
-        assert!(
-            !footer_line.contains("CI"),
-            "CI placeholder should be hidden when there are no checks; got {footer_line:?}"
-        );
-    }
-}
+mod tests;

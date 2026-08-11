@@ -1561,6 +1561,7 @@ dependencies = [
  "clap",
  "crossterm",
  "fuzzy-matcher",
+ "getrandom 0.4.3",
  "open",
  "plasma-inference",
  "plasma-openrouter",
@@ -1571,6 +1572,7 @@ dependencies = [
  "sha2",
  "syntect",
  "tokio",
+ "unicode-width 0.2.0",
  "ureq",
 ]
 
@@ -1614,6 +1616,7 @@ dependencies = [
 name = "plasma-tools"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "plasma-inference",
  "serde_json",
 ]

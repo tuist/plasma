@@ -11,6 +11,7 @@ base64.workspace = true
 clap.workspace = true
 crossterm.workspace = true
 fuzzy-matcher.workspace = true
+getrandom.workspace = true
 open.workspace = true
 plasma-inference = { path = "../plasma-inference" }
 plasma-openrouter = { path = "../plasma-openrouter" }
@@ -22,3 +23,4 @@ sha2.workspace = true
 syntect.workspace = true
 tokio.workspace = true
 ureq = { workspace = true, features = ["json"] }
+unicode-width.workspace = true
