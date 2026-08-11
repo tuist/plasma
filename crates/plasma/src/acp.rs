@@ -11,22 +11,21 @@ use std::{
 };
 
 use crate::agent_prompt::CODING_AGENT_PROMPT;
+use crate::local_tools::LocalToolSet;
 
 use agent_client_protocol::schema::v1::{
     AgentCapabilities, ContentBlock, ContentChunk, Implementation, InitializeRequest,
     InitializeResponse, NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse,
     SessionId, SessionNotification, SessionUpdate, StopReason,
 };
-use agent_client_protocol::{Agent, Result as AcpResult, Stdio};
+use agent_client_protocol::{Agent, Client, ConnectionTo, Result as AcpResult, Stdio};
 use plasma_inference::ToolDefinition;
 use plasma_openrouter::OpenRouterInferenceProvider;
-use plasma_session::{AgentEvent, Session, ToolDispatcher};
-use plasma_tools::{BashTool, ReadTool, Tool};
-use serde_json::Value;
+use plasma_session::{AgentEvent, Session};
 
 const AGENT_NAME: &str = "plasma";
 
-type Sessions = Arc<Mutex<HashMap<SessionId, HeadlessSession>>>;
+type Sessions = Arc<Mutex<HashMap<SessionId, Arc<Mutex<HeadlessSession>>>>>;
 
 /// Run Plasma as a local [Agent Client Protocol](https://agentclientprotocol.com/)
 /// agent. The protocol transport is exclusively standard input and output.
@@ -62,7 +61,7 @@ pub async fn run() -> AcpResult<()> {
                 new_session_store
                     .lock()
                     .expect("session store mutex poisoned")
-                    .insert(session_id.clone(), session);
+                    .insert(session_id.clone(), Arc::new(Mutex::new(session)));
                 responder.respond(NewSessionResponse::new(session_id))
             },
             agent_client_protocol::on_receive_request!(),
@@ -71,22 +70,8 @@ pub async fn run() -> AcpResult<()> {
             async move |request: PromptRequest, responder, connection| {
                 let prompt = prompt_text(&request.prompt);
                 let session_id = request.session_id.clone();
-                let result = sessions
-                    .lock()
-                    .expect("session store mutex poisoned")
-                    .get_mut(&session_id)
-                    .map(|session| {
-                        session.submit(prompt, |event| {
-                            if let AgentEvent::Text(text) = event {
-                                let _ = connection.send_notification(SessionNotification::new(
-                                    session_id.clone(),
-                                    SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                                        text.into(),
-                                    )),
-                                ));
-                            }
-                        })
-                    });
+                let result =
+                    submit_prompt(&sessions, prompt, session_id.clone(), connection.clone()).await;
 
                 match result {
                     Some(Ok(())) => responder.respond(PromptResponse::new(StopReason::EndTurn)),
@@ -106,24 +91,60 @@ pub async fn run() -> AcpResult<()> {
         .await
 }
 
+async fn submit_prompt(
+    sessions: &Sessions,
+    prompt: String,
+    session_id: SessionId,
+    connection: ConnectionTo<Client>,
+) -> Option<Result<(), String>> {
+    // Hold the map lock only long enough to clone this session's handle.
+    // Provider calls and local commands can take seconds, so they must not
+    // serialize unrelated sessions.
+    let session = find_session(sessions, &session_id)?;
+
+    match tokio::task::spawn_blocking(move || {
+        session
+            .lock()
+            .expect("individual session mutex poisoned")
+            .submit(prompt, |event| {
+                if let AgentEvent::Text(text) = event {
+                    let _ = connection.send_notification(SessionNotification::new(
+                        session_id.clone(),
+                        SessionUpdate::AgentMessageChunk(ContentChunk::new(text.into())),
+                    ));
+                }
+            })
+    })
+    .await
+    {
+        Ok(result) => Some(result),
+        Err(error) => Some(Err(format!("session worker failed: {error}"))),
+    }
+}
+
+fn find_session(
+    sessions: &Sessions,
+    session_id: &SessionId,
+) -> Option<Arc<Mutex<HeadlessSession>>> {
+    sessions
+        .lock()
+        .expect("session store mutex poisoned")
+        .get(session_id)
+        .cloned()
+}
+
 /// Per-ACP-session state. The editor supplies the working directory when it
 /// creates the session, so local tools are always scoped to that workspace.
 struct HeadlessSession {
     session: Result<Session<OpenRouterInferenceProvider>, String>,
     definitions: Arc<Vec<ToolDefinition>>,
-    tools: LocalToolDispatcher,
+    tools: LocalToolSet,
 }
 
 impl HeadlessSession {
     fn new(root: PathBuf) -> Self {
-        let tools: Vec<Box<dyn Tool>> = vec![
-            Box::new(ReadTool { root: root.clone() }),
-            Box::new(BashTool {
-                root,
-                ..BashTool::default()
-            }),
-        ];
-        let definitions = Arc::new(tools.iter().map(|tool| tool.definition()).collect());
+        let tools = LocalToolSet::new(root);
+        let definitions = tools.definitions();
         let session = OpenRouterInferenceProvider::from_saved_key()
             .map_err(|error| format!("Could not load the OpenRouter connection: {error}"))
             .and_then(|provider| {
@@ -134,7 +155,7 @@ impl HeadlessSession {
         Self {
             session,
             definitions,
-            tools: LocalToolDispatcher { tools },
+            tools,
         }
     }
 
@@ -152,23 +173,6 @@ impl HeadlessSession {
             )
             .map(|_| ())
             .map_err(|error| error.to_string())
-    }
-}
-
-struct LocalToolDispatcher {
-    tools: Vec<Box<dyn Tool>>,
-}
-
-impl ToolDispatcher for LocalToolDispatcher {
-    fn dispatch(&self, name: &str, arguments_json: &str) -> Result<String, String> {
-        let arguments: Value = serde_json::from_str(arguments_json)
-            .map_err(|error| format!("invalid arguments for {name}: {error}"))?;
-        let tool = self
-            .tools
-            .iter()
-            .find(|tool| tool.name() == name)
-            .ok_or_else(|| format!("unknown tool: {name}"))?;
-        tool.execute(&arguments)
     }
 }
 
@@ -198,6 +202,28 @@ mod tests {
         assert_eq!(
             prompt,
             "Inspect this:\n[readme](file:///workspace/README.md)"
+        );
+    }
+
+    #[test]
+    fn finding_a_session_releases_the_shared_map_lock() {
+        let session_id = SessionId::new("test-session");
+        let tools = LocalToolSet::new(std::env::temp_dir());
+        let session = HeadlessSession {
+            session: Err("not connected".to_string()),
+            definitions: tools.definitions(),
+            tools,
+        };
+        let sessions: Sessions = Arc::new(Mutex::new(HashMap::from([(
+            session_id.clone(),
+            Arc::new(Mutex::new(session)),
+        )])));
+
+        let session = find_session(&sessions, &session_id).expect("session exists");
+        let _session_guard = session.lock().expect("individual session lock");
+        assert!(
+            sessions.try_lock().is_ok(),
+            "locking one session must not retain the shared map lock"
         );
     }
 }

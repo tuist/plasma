@@ -12,6 +12,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 use std::{io, time::Duration};
+use unicode_width::UnicodeWidthStr;
 
 use crate::app::App;
 use crate::input;
@@ -46,7 +47,7 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()>
 
         // Pull any agent events the worker thread has produced since
         // the last frame so the document shows streamed output.
-        app.poll_agent();
+        app.poll_background();
 
         terminal.draw(|frame| draw(frame, &app))?;
 
@@ -166,7 +167,7 @@ fn draw(frame: &mut Frame, app: &App) {
         // While a request is in flight we keep the prompt calm and put the
         // activity indicator in its top border, where it does not compete
         // with the conversation transcript.
-        let body: Line = if app.pending {
+        let body: Line = if app.is_busy() {
             Line::default()
         } else {
             Line::from(vec![
@@ -175,7 +176,7 @@ fn draw(frame: &mut Frame, app: &App) {
             ])
         };
         frame.render_widget(prompt_block, *prompt_area);
-        if app.pending {
+        if app.is_busy() {
             frame.render_widget(
                 Paragraph::new(prompt_progress_line(
                     prompt_area.width,
@@ -186,13 +187,7 @@ fn draw(frame: &mut Frame, app: &App) {
         }
         frame.render_widget(Paragraph::new(body), inner);
 
-        let cursor_x = if app.pending {
-            // Hide the cursor while we wait for the worker.
-            inner.x.saturating_sub(1)
-        } else {
-            (inner.x + prompt_prefix.len() as u16 + app.input.len() as u16)
-                .min(inner.right().saturating_sub(1))
-        };
+        let cursor_x = prompt_cursor_x(inner, prompt_prefix, &app.input, app.is_busy());
         let cursor_y = inner.y;
         frame.set_cursor_position((cursor_x, cursor_y));
     }
@@ -202,6 +197,18 @@ fn draw(frame: &mut Frame, app: &App) {
         let lines = app.footer.lines(footer_area.width);
         frame.render_widget(Paragraph::new(lines), *footer_area);
     }
+}
+
+fn prompt_cursor_x(area: Rect, prefix: &str, input: &str, busy: bool) -> u16 {
+    if busy {
+        return area.x.saturating_sub(1);
+    }
+    let content_width = UnicodeWidthStr::width(prefix)
+        .saturating_add(UnicodeWidthStr::width(input))
+        .min(usize::from(u16::MAX)) as u16;
+    area.x
+        .saturating_add(content_width)
+        .min(area.right().saturating_sub(1))
 }
 
 /// A short accent segment travels along the prompt's top rule while work is
@@ -330,5 +337,11 @@ mod tests {
                 .any(|span| span.style.fg == Some(THEME.colors.accent))
         );
         assert_ne!(first.to_string(), later.to_string());
+    }
+
+    #[test]
+    fn prompt_cursor_uses_terminal_display_width_for_unicode() {
+        let area = Rect::new(4, 0, 20, 1);
+        assert_eq!(prompt_cursor_x(area, "> ", "é你", false), 9);
     }
 }
