@@ -54,3 +54,60 @@ jobs:
           components: rustfmt
       - name: cargo fmt
         run: cargo fmt --all -- --check
+
+  wasm-package:
+    name: WebAssembly package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+        with:
+          install_args: "rust node cargo:wasm-pack"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Add WebAssembly target
+        run: rustup target add wasm32-unknown-unknown
+      - name: Build package
+        run: mise run wasm:build
+      - name: Exercise package in Node.js
+        run: npm test --prefix packages/plasma
+      - name: Verify package contents
+        working-directory: packages/plasma
+        run: npm pack --dry-run
+
+  web:
+    name: Web application
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+        with:
+          install_args: "rust node elixir erlang cargo:wasm-pack"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Add WebAssembly target
+        run: rustup target add wasm32-unknown-unknown
+      - name: Install dependencies
+        working-directory: web
+        run: mix deps.get --check-locked
+      - name: Test web application
+        working-directory: web
+        run: mix test
+      - name: Build production assets
+        working-directory: web
+        run: MIX_ENV=prod mix assets.deploy

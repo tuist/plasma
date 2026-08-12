@@ -42,6 +42,43 @@ plasma acp
 
 The editor starts this command and communicates over standard input/output. Authenticate first with `plasma connect openrouter --api-key <key>`; the ACP session uses the editor-provided workspace as the root for its `read` and `bash` tools.
 
+## Browser embedding
+
+The browser package separates the portable conversation state machine from the capabilities owned by its host. A page supplies both its large language model inference configuration and the complete allowlist of tools available in that environment:
+
+```js
+import {createAgent, createHttpInference} from "@tuist/plasma"
+
+const inference = createHttpInference({
+  endpoint: "/api/completions",
+  model: "openrouter/auto",
+})
+
+const agent = await createAgent({
+  inference,
+  tools: [{
+    name: "read_page",
+    description: "Read the public content on this page",
+    parameters: {type: "object", properties: {}},
+    execute: () => document.querySelector("main").innerText,
+  }],
+})
+```
+
+The published [npm package registry](https://www.npmjs.com/) package is `@tuist/plasma`. It contains the generated JavaScript bindings and compiled [WebAssembly](https://webassembly.org/) binary. `mise run wasm:build` rebuilds the package and stages the same files for the Elixir site.
+
+## Marketing site
+
+The Phoenix site under [`web`](web) demonstrates the complete browser path. It signs developers in with OpenRouter, stores the resulting credential in an encrypted application session that page JavaScript cannot read, and proxies provider-neutral completion requests from the page. Its agent can call only the page capabilities registered in `web/assets/js/app.js`; it cannot inherit the terminal application's filesystem or shell tools.
+
+```sh
+cd web
+mix setup
+mix phx.server
+```
+
+The development address and PostgreSQL database receive one stable numeric suffix per Git worktree, allowing multiple copies to run concurrently. The server prints its actual address at startup.
+
 ## License
 
 Plasma is available under the [MIT License](LICENSE.md).

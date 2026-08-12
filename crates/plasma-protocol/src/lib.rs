@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
 pub enum Role {
     System,
     User,
@@ -11,6 +12,7 @@ pub enum Role {
 /// One function call the assistant wants the host to execute. `arguments`
 /// is a JSON-encoded object matching the tool's parameter schema.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct ToolCall {
     pub id: String,
     pub name: String,
@@ -18,6 +20,7 @@ pub struct ToolCall {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct Message {
     pub role: Role,
     pub content: String,

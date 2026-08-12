@@ -1,0 +1,12 @@
+.git
+.github
+.superconductor
+artifacts
+dist
+target
+web/_build
+web/deps
+packages/plasma/generated
+web/priv/static/assets
+web/priv/static/cache_manifest.json
+web/priv/static/plasma

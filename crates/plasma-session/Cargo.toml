@@ -7,3 +7,8 @@ license.workspace = true
 [dependencies]
 plasma-inference = { path = "../plasma-inference" }
 plasma-protocol = { path = "../plasma-protocol" }
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

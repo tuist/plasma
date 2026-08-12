@@ -6,7 +6,7 @@ on:
       - main
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
@@ -79,6 +79,8 @@ jobs:
 
   publish:
     name: Publish GitHub release
+    permissions:
+      contents: write
     needs:
       - detect
       - build
@@ -102,3 +104,36 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: mise run release:publish --version "${{ needs.detect.outputs.next-version }}" --notes release-notes.md --dist dist
+
+  publish-npm:
+    name: Publish WebAssembly package
+    permissions:
+      contents: read
+      id-token: write
+    needs:
+      - detect
+      - publish
+    if: needs.detect.outputs.should-release == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+        with:
+          install_args: "rust cargo:wasm-pack"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - name: Add WebAssembly target
+        run: rustup target add wasm32-unknown-unknown
+      - name: Build package
+        run: mise run wasm:build
+      - name: Exercise package
+        working-directory: packages/plasma
+        run: npm test
+      - name: Match the release version
+        working-directory: packages/plasma
+        run: npm version "${{ needs.detect.outputs.next-version }}" --no-git-tag-version
+      - name: Publish package
+        working-directory: packages/plasma
+        run: npm publish --access public --provenance

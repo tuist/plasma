@@ -1,4 +1,5 @@
 use plasma_protocol::Message;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
@@ -12,7 +13,8 @@ pub enum InferenceError {
 
 /// OpenAI-compatible tool definition sent to the provider. Each entry is
 /// passed through to the `tools` array of the chat completion request.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct ToolDefinition {
     pub name: String,
     pub description: String,
