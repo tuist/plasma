@@ -58,12 +58,14 @@ jobs:
   wasm-package:
     name: WebAssembly package
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
-      - uses: jdx/mise-action@v2
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
         with:
           install_args: "rust node cargo:wasm-pack"
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Add WebAssembly target
         run: rustup target add wasm32-unknown-unknown
       - name: Build package
@@ -77,6 +79,8 @@ jobs:
   web:
     name: Web application
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     services:
       postgres:
         image: postgres:18
@@ -92,10 +96,10 @@ jobs:
           --health-retries 5
     steps:
       - uses: actions/checkout@v4
-      - uses: jdx/mise-action@v2
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
         with:
           install_args: "rust node elixir erlang cargo:wasm-pack"
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Add WebAssembly target
         run: rustup target add wasm32-unknown-unknown
       - name: Install dependencies
