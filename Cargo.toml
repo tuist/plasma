@@ -6,6 +6,7 @@ members = [
   "crates/plasma-protocol",
   "crates/plasma-session",
   "crates/plasma-tools",
+  "crates/plasma-wasm",
 ]
 resolver = "3"
 
@@ -30,3 +31,4 @@ syntect = { version = "5.3", default-features = false, features = ["default-fanc
 thiserror = "2.0"
 tokio = { version = "1.48", features = ["macros", "rt-multi-thread"] }
 ureq = { version = "3.0", features = ["json"] }
+wasm-bindgen = "0.2"
