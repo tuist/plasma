@@ -7,27 +7,46 @@
 //! PKCE flow, so the only secrets involved are the verifier (kept in
 //! memory) and the resulting key (saved via `save_key`).
 
-use std::time::Duration;
+use std::{sync::atomic::AtomicBool, time::Duration};
 
 use anyhow::{Result, anyhow};
 use plasma_openrouter::shared_agent;
 
-use crate::oauth::{CallbackResult, bind_loopback, generate_pkce};
+use crate::oauth::{CallbackResult, CallbackServer, PkcePair, bind_loopback, generate_pkce};
 
 const AUTHORIZE_URL: &str = "https://openrouter.ai/auth";
 const TOKEN_URL: &str = "https://openrouter.ai/api/v1/auth/keys";
 const CALLBACK_PATH: &str = "/oauth/callback/plasma";
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
-/// Run the full OpenRouter OAuth flow. Returns the permanent API key that
-/// can be used as a Bearer token against the OpenRouter REST API.
-pub fn login<F>(open_browser: F) -> Result<String>
-where
-    F: FnOnce(&str),
-{
-    let pkce = generate_pkce();
-    let (port, rx) = bind_loopback(CALLBACK_PATH, LOGIN_TIMEOUT)?;
-    let callback_url = format!("http://127.0.0.1:{port}{CALLBACK_PATH}");
+/// A browser sign-in attempt that has opened its callback listener but has
+/// not yet waited for the browser or exchanged the authorization code.
+pub struct PendingLogin {
+    callback: CallbackServer,
+    pkce: PkcePair,
+    authorize_url: String,
+}
+
+impl PendingLogin {
+    pub fn authorize_url(&self) -> &str {
+        &self.authorize_url
+    }
+
+    pub fn complete(self, cancelled: &AtomicBool) -> Result<String> {
+        let outcome = self.callback.wait(cancelled)?;
+        let CallbackResult::Code(code) = outcome;
+        if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(anyhow!("Sign-in cancelled"));
+        }
+        exchange_code(&code, &self.pkce.verifier)
+    }
+}
+
+/// Start browser sign-in without blocking the caller.
+pub fn start_login() -> Result<PendingLogin> {
+    let pkce = generate_pkce()?;
+    let callback = bind_loopback(CALLBACK_PATH, LOGIN_TIMEOUT)?;
+    let callback_url = format!("http://127.0.0.1:{}{CALLBACK_PATH}", callback.port());
 
     let authorize_url = format!(
         "{AUTHORIZE_URL}?callback_url={callback}&code_challenge={challenge}&code_challenge_method=S256",
@@ -35,14 +54,21 @@ where
         challenge = url_encode(&pkce.challenge),
     );
 
-    open_browser(&authorize_url);
+    Ok(PendingLogin {
+        callback,
+        pkce,
+        authorize_url,
+    })
+}
 
-    let outcome = rx
-        .recv_timeout(LOGIN_TIMEOUT)
-        .map_err(|_| anyhow!("Timed out waiting for the OpenRouter OAuth callback"))?;
-    let CallbackResult::Code(code) = outcome;
-
-    exchange_code(&code, &pkce.verifier)
+/// Run the complete browser sign-in flow for non-interactive hosts.
+pub fn login<F>(open_browser: F, cancelled: &AtomicBool) -> Result<String>
+where
+    F: FnOnce(&str),
+{
+    let login = start_login()?;
+    open_browser(login.authorize_url());
+    login.complete(cancelled)
 }
 
 fn exchange_code(code: &str, verifier: &str) -> Result<String> {
@@ -106,5 +132,13 @@ mod tests {
             "http%3A%2F%2F127.0.0.1%3A12345%2Foauth%2Fcallback%2Fplasma"
         );
         assert_eq!(url_encode("abc-DEF_123.~"), "abc-DEF_123.~");
+    }
+
+    #[test]
+    fn starting_login_returns_without_waiting_for_the_callback() {
+        let started_at = std::time::Instant::now();
+        let login = start_login().expect("login starts");
+        assert!(login.authorize_url().starts_with(AUTHORIZE_URL));
+        assert!(started_at.elapsed() < Duration::from_secs(1));
     }
 }

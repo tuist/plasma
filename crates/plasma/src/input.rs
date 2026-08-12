@@ -10,6 +10,14 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
     if key.code == KeyCode::Esc {
         return handle_escape(app);
     }
+    if app.is_busy()
+        && matches!(
+            key.code,
+            KeyCode::Up | KeyCode::Down | KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Enter
+        )
+    {
+        return true;
+    }
     match key.code {
         KeyCode::Up => app.select_up(),
         KeyCode::Down => app.select_down(),
@@ -55,6 +63,9 @@ fn try_clear_or_cancel(app: &mut App) -> bool {
         app.input.clear();
         app.show_commands = false;
         app.slash_selected = None;
+        return true;
+    }
+    if app.cancel_connection() {
         return true;
     }
     if app.is_in_menu() {
@@ -115,6 +126,20 @@ mod tests {
             app.document
                 .iter()
                 .any(|line| format!("{line:?}").contains("Connection cancelled"))
+        );
+    }
+
+    #[test]
+    fn esc_cancels_a_background_connection() {
+        let mut app = App::empty();
+        app.mode = AppMode::Connecting;
+        let keep_running = handle_escape(&mut app);
+        assert!(keep_running);
+        assert!(app.is_normal());
+        assert!(
+            app.document
+                .last()
+                .is_some_and(|line| line.to_string().contains("cancelled"))
         );
     }
 

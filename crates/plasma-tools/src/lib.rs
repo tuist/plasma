@@ -1,8 +1,9 @@
 use std::{
     io::Read,
     path::{Path, PathBuf},
-    process::Command,
-    time::Duration,
+    process::{Command, Stdio},
+    thread,
+    time::{Duration, Instant},
 };
 
 use plasma_inference::ToolDefinition;
@@ -83,10 +84,7 @@ impl Tool for ReadTool {
         let mut contents = String::new();
         file.read_to_string(&mut contents)
             .map_err(|error| format!("could not read {}: {error}", path.display()))?;
-        if contents.len() > 50_000 {
-            contents.truncate(50_000);
-            contents.push_str("\n... (truncated)");
-        }
+        truncate_output(&mut contents, 50_000);
         Ok(contents)
     }
 }
@@ -134,14 +132,7 @@ impl Tool for BashTool {
             .get("command")
             .and_then(Value::as_str)
             .ok_or_else(|| "missing 'command' argument".to_string())?;
-        let output = Command::new("sh")
-            .arg("-c")
-            .arg(command)
-            .current_dir(&self.root)
-            .env_remove("GH_TOKEN")
-            .env("NO_COLOR", "1")
-            .output()
-            .map_err(|error| format!("could not spawn shell: {error}"))?;
+        let output = run_command(command, &self.root, self.timeout)?;
         let mut combined = String::new();
         if !output.stdout.is_empty() {
             combined.push_str(&String::from_utf8_lossy(&output.stdout));
@@ -152,10 +143,7 @@ impl Tool for BashTool {
             }
             combined.push_str(&String::from_utf8_lossy(&output.stderr));
         }
-        if combined.len() > 50_000 {
-            combined.truncate(50_000);
-            combined.push_str("\n... (truncated)");
-        }
+        truncate_output(&mut combined, 50_000);
         if !output.status.success() {
             return Err(format!(
                 "command exited with status {}: {combined}",
@@ -164,6 +152,119 @@ impl Tool for BashTool {
         }
         Ok(combined)
     }
+}
+
+fn run_command(
+    command: &str,
+    root: &Path,
+    timeout: Duration,
+) -> Result<std::process::Output, String> {
+    let mut process = Command::new("sh");
+    process
+        .arg("-c")
+        .arg(command)
+        .current_dir(root)
+        .env_remove("GH_TOKEN")
+        .env("NO_COLOR", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    // Give the shell its own process group so a timeout stops descendants as
+    // well as the shell itself. Without this, a child can keep the captured
+    // output pipes open after the shell has been killed.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        process.process_group(0);
+    }
+
+    let mut child = process
+        .spawn()
+        .map_err(|error| format!("could not spawn shell: {error}"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "could not capture shell standard output".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "could not capture shell standard error".to_string())?;
+    let stdout_reader = thread::spawn(move || read_pipe(stdout));
+    let stderr_reader = thread::spawn(move || read_pipe(stderr));
+
+    let started_at = Instant::now();
+    let status = loop {
+        match child
+            .try_wait()
+            .map_err(|error| format!("could not wait for shell: {error}"))?
+        {
+            Some(status) => break status,
+            None if started_at.elapsed() >= timeout => {
+                terminate_process(&mut child);
+                let _ = child.wait();
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
+                return Err(format!(
+                    "command timed out after {:.1} seconds",
+                    timeout.as_secs_f64()
+                ));
+            }
+            None => thread::sleep(Duration::from_millis(10)),
+        }
+    };
+
+    let stdout = join_pipe(stdout_reader, "standard output")?;
+    let stderr = join_pipe(stderr_reader, "standard error")?;
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+fn read_pipe(mut pipe: impl Read) -> std::io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    pipe.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+fn join_pipe(
+    reader: thread::JoinHandle<std::io::Result<Vec<u8>>>,
+    label: &str,
+) -> Result<Vec<u8>, String> {
+    reader
+        .join()
+        .map_err(|_| format!("shell {label} reader panicked"))?
+        .map_err(|error| format!("could not read shell {label}: {error}"))
+}
+
+#[cfg(unix)]
+fn terminate_process(child: &mut std::process::Child) {
+    let process_group = -(child.id() as libc::pid_t);
+    // SAFETY: the child was started as the leader of a new process group, so
+    // the negative identifier targets only that group. Failure is harmless
+    // here because `Child::kill` below still attempts to stop the direct child.
+    unsafe {
+        libc::kill(process_group, libc::SIGKILL);
+    }
+    let _ = child.kill();
+}
+
+#[cfg(not(unix))]
+fn terminate_process(child: &mut std::process::Child) {
+    let _ = child.kill();
+}
+
+fn truncate_output(output: &mut String, max_bytes: usize) {
+    if output.len() <= max_bytes {
+        return;
+    }
+    let mut boundary = max_bytes;
+    while !output.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    output.truncate(boundary);
+    output.push_str("\n... (truncated)");
 }
 
 fn resolve(root: &Path, raw: &str) -> PathBuf {
@@ -218,6 +319,18 @@ mod tests {
     }
 
     #[test]
+    fn read_tool_truncates_unicode_at_a_character_boundary() {
+        let root = temp_root();
+        let path = root.join("unicode.txt");
+        std::fs::write(&path, format!("{}é", "x".repeat(49_999))).unwrap();
+        let tool = ReadTool { root };
+        let output = tool
+            .execute(&json!({"path": "unicode.txt"}))
+            .expect("read succeeds");
+        assert!(output.ends_with("... (truncated)"));
+    }
+
+    #[test]
     fn read_tool_rejects_missing_path() {
         let tool = ReadTool { root: temp_root() };
         let result = tool.execute(&json!({}));
@@ -247,6 +360,28 @@ mod tests {
         };
         let result = tool.execute(&json!({"command": "exit 7"}));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn bash_tool_enforces_its_timeout() {
+        let tool = BashTool {
+            root: temp_root(),
+            timeout: Duration::from_millis(50),
+        };
+        let started_at = Instant::now();
+        let error = tool
+            .execute(&json!({"command": "sleep 5"}))
+            .expect_err("command should time out");
+        assert!(error.contains("timed out"), "got: {error}");
+        assert!(started_at.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn output_truncation_preserves_unicode_boundaries() {
+        let mut output = format!("{}é", "x".repeat(49_999));
+        truncate_output(&mut output, 50_000);
+        assert!(output.ends_with("... (truncated)"));
+        assert!(output.is_char_boundary(output.len()));
     }
 
     #[test]

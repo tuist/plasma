@@ -7,3 +7,4 @@ license.workspace = true
 [dependencies]
 plasma-inference = { path = "../plasma-inference" }
 serde_json.workspace = true
+libc.workspace = true

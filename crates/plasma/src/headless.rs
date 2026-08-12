@@ -3,19 +3,17 @@
 use std::{
     io::{self, IsTerminal, Read},
     path::PathBuf,
-    sync::Arc,
-    time::Duration,
 };
 
 use crate::agent_prompt::CODING_AGENT_PROMPT;
 use crate::cli::ColorChoice;
 use crate::syntax::highlight_markdown;
 use anyhow::{Context, Result, anyhow};
-use plasma_inference::ToolDefinition;
 use plasma_openrouter::OpenRouterInferenceProvider;
-use plasma_session::{AgentEvent, Session, ToolDispatcher};
-use plasma_tools::{BashTool, ReadTool, Tool};
-use serde_json::{Value, json};
+use plasma_session::{AgentEvent, Session};
+use serde_json::json;
+
+use crate::local_tools::LocalToolSet;
 
 /// Execute a single task and write only the final response to standard output.
 pub fn run(
@@ -41,10 +39,11 @@ pub fn run(
         None => OpenRouterInferenceProvider::from_saved_key()?
             .ok_or_else(|| anyhow!("not connected; run `plasma connect openrouter --api-key <key>` or set PLASMA_OPENROUTER_API_KEY"))?,
     };
-    let (definitions, dispatcher) = build_tool_chain(root);
+    let tools = LocalToolSet::new(root);
+    let definitions = tools.definitions();
     let mut session = Session::with_system_prompt(provider, CODING_AGENT_PROMPT);
     let response = session
-        .submit_with_tools(prompt, definitions, &dispatcher, &mut |event| {
+        .submit_with_tools(prompt, definitions, &tools, &mut |event| {
             if verbose {
                 print_event(event);
             }
@@ -96,42 +95,14 @@ fn print_event(event: AgentEvent) {
     }
 }
 
-struct HeadlessToolDispatcher {
-    tools: Vec<Box<dyn Tool>>,
-}
-
-impl ToolDispatcher for HeadlessToolDispatcher {
-    fn dispatch(&self, name: &str, arguments_json: &str) -> Result<String, String> {
-        let tool = self
-            .tools
-            .iter()
-            .find(|tool| tool.name() == name)
-            .ok_or_else(|| format!("unknown tool '{name}'"))?;
-        let arguments: Value = serde_json::from_str(arguments_json)
-            .map_err(|error| format!("invalid JSON arguments for {name}: {error}"))?;
-        tool.execute(&arguments)
-    }
-}
-
-fn build_tool_chain(root: PathBuf) -> (Arc<Vec<ToolDefinition>>, HeadlessToolDispatcher) {
-    let tools: Vec<Box<dyn Tool>> = vec![
-        Box::new(ReadTool { root: root.clone() }),
-        Box::new(BashTool {
-            root,
-            timeout: Duration::from_secs(30),
-        }),
-    ];
-    let definitions = tools.iter().map(|tool| tool.definition()).collect();
-    (Arc::new(definitions), HeadlessToolDispatcher { tools })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn tool_chain_exposes_read_and_bash() {
-        let (definitions, _) = build_tool_chain(std::env::temp_dir());
+        let tools = LocalToolSet::new(std::env::temp_dir());
+        let definitions = tools.definitions();
         let names: Vec<_> = definitions.iter().map(|tool| tool.name.as_str()).collect();
         assert_eq!(names, ["read", "bash"]);
     }
