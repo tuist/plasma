@@ -1,0 +1,8 @@
+/packages/plasma/generated/
+/target/
+/web/priv/static/plasma/
+/artifacts/
+/web/_build/
+/web/deps/
+/web/priv/static/assets/
+/web/priv/static/cache_manifest.json

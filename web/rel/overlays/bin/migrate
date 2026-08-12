@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+
+cd "$(dirname "$0")"
+exec ./plasma_site eval PlasmaSite.Release.migrate
