@@ -1,7 +1,6 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 
-use plasma_openrouter::import_pi_openrouter_credential;
 use plasma_tools::workspace_files;
 
 use crate::browser::{BrowserOpener, SystemBrowser};
@@ -19,8 +18,6 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// Copy the OpenRouter credential from Pi without printing it.
-    ImportPiCredentials,
     /// Run one coding task without an interactive terminal interface.
     Exec {
         /// Task for Plasma to complete. When omitted, Plasma reads the task from standard input.
@@ -66,14 +63,6 @@ pub fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Some(Command::Acp) => {
             tokio::runtime::Runtime::new()?.block_on(crate::acp::run())?;
-            Ok(())
-        }
-        Some(Command::ImportPiCredentials) => {
-            if import_pi_openrouter_credential()? {
-                println!("Imported OpenRouter credential from Pi.");
-            } else {
-                println!("Plasma already has an OpenRouter credential.");
-            }
             Ok(())
         }
         Some(Command::Exec {
@@ -163,6 +152,11 @@ mod tests {
             panic!("expected connect command");
         };
         assert!(api_key.is_none());
+    }
+
+    #[test]
+    fn pi_credential_import_is_not_a_command() {
+        assert!(Cli::try_parse_from(["plasma", "import-pi-credentials"]).is_err());
     }
 
     #[test]

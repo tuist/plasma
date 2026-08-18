@@ -16,12 +16,6 @@ Save a key without opening the terminal interface:
 plasma connect openrouter --api-key <key>
 ```
 
-If Pi already has an OpenRouter credential, import it without printing the value:
-
-```sh
-plasma import-pi-credentials
-```
-
 ## Configure unattended jobs
 
 Set the key in the environment:
