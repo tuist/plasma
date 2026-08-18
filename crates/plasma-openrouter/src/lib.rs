@@ -15,7 +15,7 @@ const AUTH_KEY_URL: &str = "https://openrouter.ai/api/v1/auth/key";
 
 mod credentials;
 
-pub use credentials::{CredentialStore, FileCredentialStore, import_pi_openrouter_credential};
+pub use credentials::{CredentialStore, FileCredentialStore};
 
 /// Shared ureq agent so the connection pool and timeouts are configured
 /// in one place. The agent is created on first use and reused for the

@@ -42,14 +42,6 @@ plasma connect openrouter --api-key <KEY>
 
 Prefer `PLASMA_OPENROUTER_API_KEY` for unattended scripts so the key is not present in shell history.
 
-## `plasma import-pi-credentials`
-
-Import Pi's saved OpenRouter credential without printing it:
-
-```sh
-plasma import-pi-credentials
-```
-
 ## `plasma acp`
 
 Run Plasma as an [Agent Client Protocol](https://agentclientprotocol.com/) server over standard input and output:

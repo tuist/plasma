@@ -8,7 +8,6 @@ use std::{
 };
 
 use fs2::FileExt;
-use serde_json::Value;
 
 const CREDENTIAL_FILE: &str = "openrouter.key";
 const LOCK_FILE: &str = ".credentials.lock";
@@ -47,16 +46,6 @@ impl FileCredentialStore {
 
     fn credential_path(&self) -> PathBuf {
         self.directory.join(CREDENTIAL_FILE)
-    }
-
-    fn save_if_missing(&self, credential: &str) -> io::Result<bool> {
-        self.with_lock(|| {
-            if self.credential_path().exists() {
-                return Ok(false);
-            }
-            self.write_credential(credential)?;
-            Ok(true)
-        })
     }
 
     fn write_credential(&self, credential: &str) -> io::Result<()> {
@@ -117,36 +106,6 @@ impl CredentialStore for FileCredentialStore {
     }
 }
 
-/// Import Pi's OpenRouter access credential without printing it. Returns true
-/// when an import happened and false when Plasma already has a credential.
-pub fn import_pi_openrouter_credential() -> io::Result<bool> {
-    let store = FileCredentialStore::from_environment()?;
-    let source = env::var_os("PLASMA_PI_AUTH_FILE")
-        .map(PathBuf::from)
-        .or_else(default_pi_auth_file)
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                "could not determine Pi credential path",
-            )
-        })?;
-    let contents = fs::read_to_string(&source)?;
-    let value: Value = serde_json::from_str(&contents)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    let credential = value
-        .get("openrouter")
-        .and_then(|entry| entry.get("access"))
-        .and_then(Value::as_str)
-        .filter(|credential| !credential.is_empty())
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                "Pi has no OpenRouter access credential",
-            )
-        })?;
-    store.save_if_missing(credential)
-}
-
 fn xdg_config_home() -> io::Result<PathBuf> {
     if let Some(path) = env::var_os("XDG_CONFIG_HOME").filter(|path| !path.is_empty()) {
         return Ok(PathBuf::from(path));
@@ -155,12 +114,6 @@ fn xdg_config_home() -> io::Result<PathBuf> {
         .map(PathBuf::from)
         .ok_or_else(|| io::Error::other("could not resolve the home directory"))?;
     Ok(home.join(".config"))
-}
-
-fn default_pi_auth_file() -> Option<PathBuf> {
-    env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|home| home.join(".pi").join("agent").join("auth.json"))
 }
 
 fn set_private_permissions(path: &Path) -> io::Result<()> {
